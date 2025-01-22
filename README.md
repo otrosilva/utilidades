@@ -6,7 +6,7 @@
 ```
 lua bit.lua [+][bitacora [texto]] 
 ```
- - + abre el editor con la bitácora seleccionada.
+ - \+ abre el editor con la bitácora seleccionada.
 
 ## son.lua -- Si o No 
 ```
