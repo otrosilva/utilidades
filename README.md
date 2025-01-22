@@ -1,5 +1,13 @@
 # Algunos scripts útiles
 
+## bit.lua -- una bitácora estilo log
+ - se guardan en la ubicación seleccionada en el script.
+ - Uso:
+```
+lua bit.lua [+][bitacora [texto]] 
+```
+ - + abre el editor con la bitácora seleccionada.
+
 ## son.lua -- Si o No 
 ```
 ❯ lua son.lua --help

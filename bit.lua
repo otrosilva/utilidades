@@ -1,78 +1,77 @@
 #!/usr/bin/env lua
 local os = require("os")
 local io = require("io")
-local arg = { ... } -- Command line arguments
+local arg = { ... } -- Argumentos de la línea de comandos
 
--- Configuration
+-- Configuración
 local base_path = os.getenv("HOME") .. "/iCloud/Docs/Registros"
-local show_command = "tail -n 5" -- Command to display the log
-local editor = os.getenv("EDITOR") or "hx" -- Define your editor here
-local editor_args = "+99999" -- Arguments passed to the editor
+local show_command = "cat" -- Comando para mostrar el registro
+local editor = os.getenv("EDITOR") or "hx" -- Define tu editor aquí
+local editor_args = "+99999" -- Argumentos pasados al editor
 
--- Function to check if a directory exists
+-- Función para comprobar si existe un directorio
 local function dir_exists(path)
 	local file = io.open(path, "r")
 	if file then
 		local _, _, code = file:read(1)
 		file:close()
-		return code == 21 -- 21 is the error code for "Is a directory"
+		return code == 21 -- 21 es el código de error para "Es un directorio"
 	else
 		return false
 	end
 end
 
--- Function to display help
+-- Función para mostrar ayuda
 local function show_help()
 	print([[
-Usage: bit.lua [options] [title] [content]
+Uso: bit.lua [opciones] [titulo] [contenido]
 
-Description:
-This script manages log entries in text files located in the user's iCloud/Docs/Registros directory.
+Descripción:
+Este script gestiona entradas de registro en archivos de texto ubicados en el directorio iCloud/Docs/Registros del usuario.
 
-Options:
-  title        The title of the log entry (used as the filename without the .txt extension).
-  content      The content to log. If provided, it appends a timestamped entry to the log file.
-               If no content is provided, it displays the last 5 lines of the log file.
-               If the title starts with '+', it opens the log file in the specified editor.
+Opciones:
+  titulo        El título de la entrada de registro (se usa como nombre de archivo sin la extensión .txt).
+  contenido     El contenido del registro. Si se proporciona, se añade una entrada con la marca de tiempo al archivo de registro.
+               Si no se proporciona contenido, muestra las últimas 5 líneas del archivo de registro.
+               Si el título comienza con '+', abre el archivo de registro en el editor especificado.
 
-Commands:
-  - If no arguments are provided, lists all .txt files (titles) in the directory.
-  - If the title is provided without content, displays the last 5 lines of the corresponding log file.
-  - If the title is prefixed with '+', opens the log file in the specified editor.
-  - If content is provided, appends it to the log file with a timestamp.
+Comandos:
+  - Si no se proporcionan argumentos, lista todos los archivos .txt (títulos) en el directorio.
+  - Si se proporciona solo el título sin contenido, muestra las últimas 5 líneas del archivo de registro correspondiente.
+  - Si el título empieza con '+', abre el archivo de registro en el editor especificado.
+  - Si se proporciona contenido, lo añade al archivo de registro con una marca de tiempo.
 
-Environment Variables:
-  HOME         The base directory for log files.
-  EDITOR       The default text editor to use (defaults to 'hx' if not set).
+Variables de Entorno:
+  HOME          El directorio base para los archivos de registro.
+  EDITOR        El editor de texto predeterminado a utilizar (por defecto es 'hx' si no está configurado).
 ]])
 	os.exit(0)
 end
 
--- Check for --help argument
+-- Comprobar el argumento --help
 if arg[1] == "--help" then
 	show_help()
 end
 
--- Check if the base path exists
+-- Comprobar si existe el directorio base
 if not dir_exists(base_path) then
-	print("Directory " .. base_path .. " does not exist.")
+	print("El directorio " .. base_path .. " no existe.")
 	os.exit(1)
 end
 
--- Function to list .txt files in a given directory using standard libraries
--- Function to list .txt files in a given directory using standard Lua libraries
+-- Función para listar archivos .txt en un directorio dado
 local function list_txt_files(directory)
 	local txt_files = {}
 
-	-- Execute the command to list .txt files
-	local command = "ls " .. directory .. "/*.txt 2>/dev/null" -- Suppress error output
+	-- Ejecutar el comando para listar archivos .txt
+	local command = "ls " .. directory .. "/*.txt 2>/dev/null" -- Suprimir salida de error
 	local handle = io.popen(command)
-	local result = handle:read("*a") -- Read all output
+	local result = handle:read("*a") -- Leer toda la salida
 	handle:close()
 
-	-- Process the output
+	-- Procesar la salida
 	for file in result:gmatch("[^\n]+") do
-		-- Remove the directory path and the .txt extension
+		-- Eliminar la ruta del directorio y la extensión .txt
 		local filename = file:match("([^/]+)%.txt$")
 		if filename then
 			table.insert(txt_files, filename)
@@ -82,53 +81,53 @@ local function list_txt_files(directory)
 	return txt_files
 end
 
--- If no arguments are provided, list the .txt files without the extension
+-- Si no se proporcionan argumentos, listar los archivos .txt sin la extensión
 if #arg == 0 then
-	print("Bit files:")
+	print("Archivos de registro:")
 	local files = list_txt_files(base_path)
 	if #files > 0 then
 		for _, file in ipairs(files) do
-			io.write(file, "\n") -- Use io.write to control output
+			io.write(file, "\n") -- Usar io.write para controlar la salida
 		end
 	else
-		print("No bit files found.")
+		print("No se encontraron archivos de registro.")
 	end
 	os.exit(0)
 end
 
--- Check if the first argument starts with '+'
+-- Comprobar si el primer argumento empieza con '+'
 local has_plus = arg[1]:sub(1, 1) == "+"
 local title = has_plus and arg[1]:sub(2) or arg[1]
 local file_name = title .. ".txt"
 local file_path = base_path .. "/" .. file_name
 
--- If there is no content after the file name
+-- Si no hay contenido después del nombre del archivo
 if #arg == 1 then
 	if has_plus then
-		-- If it has a '+', open the editor
+		-- Si tiene un '+', abrir el editor
 		os.execute(editor .. " " .. editor_args .. " " .. file_path)
 	else
-		-- If it does not have a '+', display the last 5 lines
-		-- Use show_command to display the log file
+		-- Si no tiene un '+', mostrar las últimas 5 líneas
+		-- Usar show_command para mostrar el archivo de registro
 		os.execute(show_command .. " " .. file_path)
 	end
 	os.exit(0)
 end
 
--- If there is content, create the log entry with the current date and time
+-- Si hay contenido, crear la entrada en el registro con la fecha y hora actual
 local timestamp = os.date("%Y-%m-%d %H:%M:%S")
 local log_entry = string.format("%s [%s]: %s", timestamp, title, table.concat(arg, " ", 2))
 
--- Create the directory if it does not exist
+-- Crear el directorio si no existe
 os.execute('mkdir -p "' .. base_path .. '"')
 
--- Append the log entry to the end of the file
+-- Añadir la entrada al final del archivo
 local file = io.open(file_path, "a")
 file:write(log_entry .. "\n")
 file:close()
-print("Added to [" .. title .. "]")
+print("Añadido a [" .. title .. "]")
 
--- Open the file with the default editor if the first argument had a '+'
+-- Abrir el archivo con el editor predeterminado si el primer argumento tenía un '+'
 if has_plus then
 	os.execute(editor .. " " .. editor_args .. " " .. file_path)
 end
