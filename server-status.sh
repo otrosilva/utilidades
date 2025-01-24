@@ -53,7 +53,6 @@ MESSAGE+="Tailscale IPv4: $TAILSCALE_IP%0A"
 
 # Enviar mensaje a través del bot de Telegram
 # 
-TELEGRAM_BOT_TOKEN="7065209211:AAF_GLMjPmyB7_81cO9vigPiw61fYmFgeR4"
 CHAT_ID="5098223"
 URL="https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"
 
