@@ -17,11 +17,11 @@ lua bit.lua [+][bitacora [texto]]
 Yes? y
 0
 ```
-## bot.lua -- revisa cambios en sitios web y avisa por telegram
+## bot.lua/bot.sh -- revisa cambios en sitios web y avisa por telegram
  - Avisa por telegram si ha cambiado alguna de las urls.
  - Uso:
  ```
 lua bot.lua chat_id url1 url2 ..
- ```
-  
-
+sh bot.sh chat_id url1 url2 ..
+```
+ 
