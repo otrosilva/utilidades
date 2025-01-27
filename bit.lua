@@ -53,10 +53,12 @@ if arg[1] == "--help" then
 	show_help()
 end
 
--- Comprobar si existe el directorio base
+-- Crear el directorio si no existe
 if not dir_exists(base_path) then
-	print("El directorio " .. base_path .. " no existe.")
-	os.exit(1)
+	if not os.execute("mkdir -p " .. base_path) then -- Si no funciona, avisar
+		print("No se pudo crear el directorio " .. base_path)
+		os.exit(1)
+	end
 end
 
 -- Función para listar archivos .txt en un directorio dado

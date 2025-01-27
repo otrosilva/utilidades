@@ -5,40 +5,44 @@ local current_dir = ((debug.getinfo(1, "S").source:match("@(.*)/") or "./") .. "
 local config_file = current_dir .. "bot.config"
 
 -- Función para leer el archivo de configuración
-local function read_config(file_path)
+function read_toml(file_path)
     local config = {}
+    local current_section = nil
+
     for line in io.lines(file_path) do
-        local key, value = line:match("([%w_]+)=(.+)")
-        if key and value then
-            config[key] = value:gsub('^"(.*)"$', "%1") -- Elimina las comillas al principio y al final
+        line = line:match("^%s*(.-)%s*$") -- Eliminar espacios en blanco al inicio y al final
+
+        if line:sub(1, 1) == "[" and line:sub(-1) == "]" then
+            -- Nueva sección
+            current_section = line:sub(2, -2) -- Obtener el nombre de la sección
+            config[current_section] = {}
+        elseif current_section and line ~= "" then
+            -- Procesar clave-valor
+            local key, value = line:match("^(%S+)%s*=%s*(.+)$")
+            if key and value then
+                -- Eliminar comillas del valor
+                value = value:gsub('^"%s*(.-)%s*"$', '%1')
+                config[current_section][key] = value
+            end
         end
     end
+
     return config
 end
 
--- Función para verificar el token de Telegram
-local function verify_telegram_token(token)
-    if not token or token == "" then
-        print("Error: TELEGRAM_BOT_TOKEN no está definido en 'bot.config'.")
-        os.exit(1)
-    end
-end
-
--- Función para obtener la URL de la API de Telegram
-local function get_telegram_url(token)
-    return string.format("https://api.telegram.org/bot%s/sendMessage", token)
-end
-
 -- Leer configuración
-local config = read_config(config_file)
+local config = read_toml(config_file)
 
--- Verificar token de Telegram
-local TELEGRAM_BOT_TOKEN = config["TELEGRAM_BOT_TOKEN"]
-verify_telegram_token(TELEGRAM_BOT_TOKEN)
+-- Acceder a la configuración de Telegram
+
+if not config["telegram"] then
+    print("No se encontró la sección [telegram].")
+end
+
 
 -- Función para enviar mensaje a Telegram
 local function send_telegram_message(chat_id, msg)
-    local telegram_url = get_telegram_url(TELEGRAM_BOT_TOKEN)
+    local telegram_url = config["telegram"]["url"] -- incluye api token en la url
 
     -- Usar el formato adecuado para enviar los datos con POST
     local msg_os = string.format(
@@ -156,8 +160,10 @@ for i = 2, #arg do
 	-- Solo guardar el texto limpio en un archivo si ha cambiado
 	if has_changed then
 		log_message(URL .. " ha cambiado.")
-		send_telegram_message(chat_id,URL .. " ha cambiado.")
-	else
-		log_message(URL .. " sin cambios.")
+		if config["telegram"] then
+			if not send_telegram_message(chat_id,config["telegram"]["url"] .. " ha cambiado.") then
+				log_message("Error enviando mensaje a telegram")
+			end
+		end
 	end
 end

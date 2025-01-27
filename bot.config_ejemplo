@@ -1,1 +1,3 @@
-TELEGRAM_BOT_TOKEN="TOKEN DE TELEGRAM"
+[telegram]
+token="TOKEN DE TELEGRAM"
+url="https://api.telegram.org/botTOKEN_DE_TELEGRAM/sendMessage"
