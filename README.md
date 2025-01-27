@@ -11,11 +11,17 @@ lua bit.lua [+][bitacora [texto]]
 ## son.lua -- Si o No 
 ```
 ❯ lua son.lua --help
-Uso: ./son.lua [OpciónSi] [OpciónNo] [Mensaje]
-Regresa 0 si se responde con OpciónSi o la primera letra, de lo contrario 1
-
+- Regresa 0 si se responde con OpciónSi o la primera letra, de lo contrario 1
+- Uso: ./son.lua [OpciónSi] [OpciónNo] [Mensaje]
 > lua son.lua Yes; echo $?
 Yes? y
 0
 ```
+## bot.lua -- revisa cambios en sitios web y avisa por telegram
+ - Avisa por telegram si ha cambiado alguna de las urls.
+ - Uso:
+ ```
+lua bot.lua chat_id url1 url2 ..
+ ```
+  
 
