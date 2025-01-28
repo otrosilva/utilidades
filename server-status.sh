@@ -3,17 +3,13 @@
 # Usar el token para telegram
 CONFIG_FILE="bot.config"
 
-if [ -f "$CONFIG_FILE" ]; then
-    # Carga las variables del archivo
-    . "$CONFIG_FILE"
-else
-    echo "Error: El archivo de configuración '$CONFIG_FILE' no existe."
-    exit 1
-fi
+# Cargar configuración
+[ -f $CONFIG_FILE ] && . $CONFIG_FILE || { echo "Error: Archivo $CONFIG_FILE no encontrado."; exit 1; }
+[ -z "$tg_url" ] && { echo "Error: tg_url no definido."; exit 1; }
 
 # Verifica que la variable TELEGRAM_BOT_TOKEN esté definida
-if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo "Error: TELEGRAM_BOT_TOKEN no está definido en '$CONFIG_FILE'."
+if [ -z "$tg_url" ]; then
+    echo "Error: tg_url no está definido en '$CONFIG_FILE'."
     exit 1
 fi
 
@@ -44,17 +40,16 @@ if [ -z "$TAILSCALE_IP" ]; then
 fi
 
 # Formatear el mensaje para Telegram
-MESSAGE="Servidor $HOSTNAME:%0A%0A"
-MESSAGE+="Uptime: $UPTIME%0A"
-MESSAGE+="Uso de Disco: $DISK_USAGE%0A"
-MESSAGE+="Uso de Memoria: $MEMORY%0A"
-MESSAGE+="Temperatura CPU: $TEMP_C°C%0A"
-MESSAGE+="Tailscale IPv4: $TAILSCALE_IP%0A"
+MESSAGE=$(printf "Servidor %s:
+Uptime: %s
+Uso de Disco: %s
+Uso de Memoria: %s
+Temperatura CPU: %s°C
+Tailscale IPv4: %s" "$HOSTNAME" "$UPTIME" "$DISK_USAGE" "$MEMORY" "$TEMP_C" "$TAILSCALE_IP")
+
 
 # Enviar mensaje a través del bot de Telegram
 # 
 CHAT_ID="5098223"
-URL="https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"
 
-curl -s -X POST $URL -d chat_id=$CHAT_ID -d text="$MESSAGE" --header "Content-Type: application/x-www-form-urlencoded"
-
+curl -s -X POST $tg_url -d chat_id=$CHAT_ID -d text="$MESSAGE" --header "Content-Type: application/x-www-form-urlencoded"
