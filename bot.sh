@@ -1,13 +1,7 @@
 #!/bin/sh
 
-# Cargar configuración
-[ -f "bot.config" ] && . "bot.config" || { echo "Error: Archivo 'bot.config' no encontrado."; exit 1; }
-[ -z "$tg_url" ] && { echo "Error: tg_url no definido."; exit 1; }
-
 # Validar argumentos
-[ "$#" -lt 2 ] && { echo "Uso: $0 [CHAT_ID] [WEBSITE_URL...]"; exit 1; }
-
-CHAT_ID="$1"; shift
+[ "$#" -lt 1 ] && { echo "Uso: $0 [WEBSITE_URL...]"; exit 1; }
 
 # Procesar sitios web
 for URL in "$@"; do
@@ -41,9 +35,8 @@ for URL in "$@"; do
     [ -f "$FILE" ] && OLD_TEXT=$(cat "$FILE") || OLD_TEXT=""
 
     if [ "$TEXT" != "$OLD_TEXT" ]; then
-        MSG="$URL ha cambiado"
-        curl -s -X POST $tg_url \
-            -d "chat_id=$CHAT_ID" -d "text=$MSG" | grep -q '"ok":true' && \
+        ./telegram.sh "$URL ha cambiado" \
+            | grep -q '"ok":true' && \
             echo "$URL mensaje enviado" || \
             echo "[$(date +"$format_date")] $URL error al enviar mensaje." >> bot.log
         echo "$TEXT" > "$FILE"

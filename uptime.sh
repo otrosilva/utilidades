@@ -1,5 +1,3 @@
-#!/bin/sh
-
 UPTIME=$(uptime | sed -E 's/^[^,]*up *//; s/, *[[:digit:]]* users.*//; s/min/minutes/; s/([[:digit:]]+):0?([[:digit:]]+)/\1 hours, \2 minutes/')
 TEMP=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 if [ -n "$TEMP" ]; then
@@ -18,11 +16,14 @@ if [[ "$TEMP_C" != "" && "$TEMP_C" -gt 70 ]]; then
 else
   TEMP_MESSAGE="la temperatura es de $TEMP_C °C"
 fi
+
+/home/jose/bin/random_phrases.sh
+
 HOSTNAME=$('hostname')
 
-MESSAGE="¡$HOSTNAME ha estado en guardia durante $UPTIME!.
+echo "+----------------------"
+echo "¡$HOSTNAME ha estado en guardia durante $UPTIME!.
 Inventario en uso: $MEMORY, $TEMP_MESSAGE.
 Nuestro portal $TAILSCALE_IP.
 Tu diario es bit tareas."
-
-telegram.sh "$MESSAGE"
+echo "+----------------------"
