@@ -33,8 +33,15 @@ sh bot.sh chat_id url1 url2 ..
  sh server-status.sh
 ```
 ## backup.sh
-- para respaldar servidores de forma sencilla.
+- Se usa para respaldar servidores de forma sencilla. Si no existen, crea dos archivos en el servidor remoto: to_backup.txt, to_exclude.txt. Si existen, usa el contenido para saber que respaldar, y que excluir de los respaldos.
 - Uso:
 ```
  sh backup.sh IP/hostname
+```
+
+## telegram.sh
+- Se usa para enviar mensajes usando la api de telegram, se debe usar el archivo de configuración telegram.config.
+- Uso:
+```
+sh telegram.sh mensaje
 ```
