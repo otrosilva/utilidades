@@ -1,3 +1,0 @@
-TG_TOKEN="TOKEN DE TELEGRAM"
-TG_URL="https://api.telegram.org/bot$TG_TOKEN/sendMessage"
-TG_CHAT_ID="ID DEL CHAT DE TELEGRAM"

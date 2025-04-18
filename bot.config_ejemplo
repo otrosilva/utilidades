@@ -1,4 +1,0 @@
-tg_token="TOKEN DE TELEGRAM"
-tg_url="https://api.telegram.org/botTOKEN_DE_TELEGRAM/sendMessage"
-format_date="%Y-%m-%d %H:%M:%S"
-curl_args="-L --max-redirs 1"
