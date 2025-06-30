@@ -1,5 +1,12 @@
 # Algunos scripts útiles
 
+## AHK -- scripts para autohotkey en windows
+
+### recordatorios_obsidian.ahk
+Continuamente revisa el archivo con la fecha actual en formato YYYY-MM-DD.md compatible con Obsidian.md y muestra los recordatorios por línea en formato "HH:MM MENSAJE".
+Ignora los recordatorios que ya han pasado, tachados (Ejemplo: ~~12:05 hola~)
+Ignora todo lo que esté luego de la primera línea delimitadora "----"
+
 ## bit.lua -- una bitácora estilo log
 Para registrar cualquier tipo de eventos al estilo log.
 - Uso:
@@ -11,14 +18,14 @@ lua bit.lua [+][bitacora [texto]]
 
 ## son.lua -- Si o No
 Regresa 0 si se responde con OpciónSi o la primera letra, de lo contrario 1
-- Uso: 
+- Uso:
 ```
 > lua son.lua Yes; echo $?
 Yes? y
 0
 ```
 ## bot.lua/bot.sh
-Un bot para avisar si hay cambios en sitios web. 
+Un bot para avisar si hay cambios en sitios web.
  - Uso:
  ```
 lua bot.lua chat_id url1 url2 ..
