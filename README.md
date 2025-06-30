@@ -2,10 +2,13 @@
 
 ## AHK -- scripts para autohotkey en windows
 
-### recordatorios_obsidian.ahk
+### recordatorios_obsidian.ahk
+
 Continuamente revisa el archivo con la fecha actual en formato YYYY-MM-DD.md compatible con Obsidian.md y muestra los recordatorios por línea en formato "HH:MM MENSAJE".
-Ignora los recordatorios que ya han pasado, tachados (Ejemplo: ~~12:05 hola~)
-Ignora todo lo que esté luego de la primera línea delimitadora "----"
+
+Ignora los recordatorios que ya han pasado, tachados (Ejemplo: ~~12:05 hola~).
+
+Ignora todo lo que esté luego de la primera línea delimitadora "----".
 
 ## bit.lua -- una bitácora estilo log
 Para registrar cualquier tipo de eventos al estilo log.
