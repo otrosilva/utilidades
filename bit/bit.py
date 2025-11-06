@@ -6,11 +6,12 @@ from pathlib import Path
 
 
 class Bitacora:
-    def __init__(self, ruta="~/bits/", editor="nano", show="cat"):
-        self.ruta = Path(ruta).expanduser()
-        if not self.ruta.is_dir():
-            print(f"Error: La ruta {self.ruta} no existe o no es un directorio.")
-            return
+    def __init__(self, archivo="~/Documentos/bits.txt", editor="nano", show="cat"):
+        self.archivo = Path(archivo).expanduser()
+
+        # Crear el directorio padre si no existe
+        self.archivo.parent.mkdir(parents=True, exist_ok=True)
+
         self.editor = editor or os.getenv("EDITOR")
         self.show = show or "tail"
 
@@ -29,83 +30,160 @@ class Bitacora:
         print("--- Fin de la Configuración ---")
 
     def listar(self):
-        txt_files = list(self.ruta.glob("*.txt"))
-        if txt_files:
-            for file in txt_files:
-                print(file.stem)
-        else:
+        """Lista todas las bitácoras únicas encontradas en el archivo"""
+        if not self.archivo.exists():
             print("No hay bitácoras")
+            return
+
+        bitacoras = set()
+        try:
+            with open(self.archivo, "r", encoding="utf-8") as f:
+                for linea in f:
+                    if linea.strip():
+                        # Extraer el nombre de la bitácora (primera palabra)
+                        partes = linea.strip().split()
+                        if partes:
+                            bitacoras.add(partes[0])
+
+            if bitacoras:
+                for bitacora in sorted(bitacoras):
+                    print(bitacora)
+            else:
+                print("No hay bitácoras")
+        except Exception as e:
+            print(f"Error al leer el archivo: {e}")
+
+    def _obtener_bitacoras_con_patron(self, patron):
+        """Obtiene todas las bitácoras que coinciden con un patrón"""
+        if not self.archivo.exists():
+            return []
+
+        bitacoras = set()
+        try:
+            with open(self.archivo, "r", encoding="utf-8") as f:
+                for linea in f:
+                    if linea.strip():
+                        partes = linea.strip().split()
+                        if partes and partes[0].startswith(patron):
+                            bitacoras.add(partes[0])
+            return sorted(bitacoras)
+        except Exception as e:
+            print(f"Error al leer el archivo: {e}")
+            return []
 
     def mostrar(self, bitacora):
-        ruta_completa = self.ruta / f"{bitacora}.txt"
-        if not ruta_completa.exists():
-            print(f"Archivo {bitacora}.txt no existe.")
+        """Muestra todas las líneas que empiezan con el nombre de la bitácora o patrón"""
+        if not self.archivo.exists():
+            print(f"No hay entradas para {bitacora}")
             return
+
         try:
-            _ = subprocess.run([self.show, str(ruta_completa)], check=False)
+            with open(self.archivo, "r", encoding="utf-8") as f:
+                lineas_exactas = [
+                    linea.strip()
+                    for linea in f
+                    if linea.strip().startswith(f"{bitacora} ")
+                ]
+
+            if lineas_exactas:
+                # Mostrar entradas exactas
+                for linea in lineas_exactas:
+                    print(linea)
+            else:
+                # Buscar bitácoras que coincidan con el patrón
+                bitacoras_patron = self._obtener_bitacoras_con_patron(bitacora)
+
+                if bitacoras_patron:
+                    print("Bitácoras:")
+                    for bitacora_patron in bitacoras_patron:
+                        print(bitacora_patron)
+                else:
+                    print(f"No hay entradas para {bitacora}")
+
         except Exception as e:
-            print(f"Error al ejecutar el comando {self.show}: {e}")
+            print(f"Error al leer el archivo: {e}")
 
     def directorio(self, bitacora):
-        ruta_completa = self.ruta / f"{bitacora}.txt"
-        if ruta_completa.exists():
-            print(ruta_completa)
-        else:
-            print(f"Archivo {bitacora}.txt no existe.")
+        """Muestra la ruta del archivo único"""
+        print(self.archivo)
         return
 
     def editar(self, bitacora):
-        ruta_completa = self.ruta / f"{bitacora}.txt"
+        """Abre el editor para el archivo único"""
         try:
-            ruta_completa.touch(exist_ok=True)
-            resultado = subprocess.run([self.editor, str(ruta_completa)], check=False)
+            self.archivo.touch(exist_ok=True)
+            resultado = subprocess.run([self.editor, str(self.archivo)], check=False)
             if resultado.returncode == 0:
-                print(f"Archivo {bitacora}.txt editado exitosamente.")
+                print(f"Archivo {self.archivo.name} editado exitosamente.")
             else:
                 print(f"Error al ejecutar el editor: código {resultado.returncode}")
         except Exception as e:
             print(f"Error al ejecutar el editor: {e}")
 
     def agregar(self, bitacora, texto):
-        ruta_completa = self.ruta / f"{bitacora}.txt"
+        """Agrega una nueva entrada al archivo único"""
         try:
-            with open(ruta_completa, "a", encoding="utf-8") as archivo:
+            with open(self.archivo, "a", encoding="utf-8") as archivo:
                 prefijo = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log_entry = f"{prefijo} [{bitacora}]: {texto}\n"
+                log_entry = f"{bitacora} {prefijo}: {texto}\n"
                 _ = archivo.write(log_entry)
-            print(f"Nueva entrada agregada exitosamente al archivo {bitacora}.txt")
+            print(f"Nueva entrada agregada exitosamente para {bitacora}")
         except Exception as e:
             print(f"Error al abrir o escribir el archivo: {e}")
 
     def borrar(self, bitacora, todo=False):
-        ruta_completa = self.ruta / f"{bitacora}.txt"
-        if not ruta_completa.exists():
-            print(f"Error: El archivo {bitacora}.txt no existe.")
+        """Borra líneas del archivo único"""
+        if not self.archivo.exists():
+            print(f"Error: El archivo {self.archivo.name} no existe.")
             return
 
         if todo:
             confirmacion = input(
-                f"¿Está seguro de que desea borrar el archivo {bitacora}.txt? (s/n): "
+                f"¿Está seguro de que desea borrar TODAS las entradas de {bitacora}? (s/n): "
             )
             if confirmacion.lower() == "s":
                 try:
-                    ruta_completa.unlink()
-                    print(f"Archivo {bitacora}.txt borrado exitosamente.")
+                    # Leer todas las líneas y filtrar
+                    with open(self.archivo, "r", encoding="utf-8") as f:
+                        lineas = [
+                            linea
+                            for linea in f
+                            if not linea.strip().startswith(f"{bitacora} ")
+                        ]
+
+                    # Reescribir el archivo sin las líneas de la bitácora
+                    with open(self.archivo, "w", encoding="utf-8") as f:
+                        f.writelines(lineas)
+
+                    print(f"Todas las entradas de {bitacora} han sido borradas.")
                 except Exception as e:
-                    print(f"Error al borrar el archivo: {e}")
+                    print(f"Error al borrar las entradas: {e}")
             else:
                 print("Operación de borrado cancelada.")
         else:
             try:
-                with open(ruta_completa, "r", encoding="utf-8") as archivo:
-                    lineas = archivo.readlines()
-                if lineas:
-                    lineas = lineas[:-1]
-                    with open(ruta_completa, "w", encoding="utf-8") as archivo:
-                        archivo.writelines(lineas)
-                    print(f"Última línea borrada de {bitacora}.txt")
+                # Leer todas las líneas
+                with open(self.archivo, "r", encoding="utf-8") as f:
+                    lineas = f.readlines()
+
+                # Encontrar la última línea de la bitácora
+                ultima_linea_idx = -1
+                for i in range(len(lineas) - 1, -1, -1):
+                    if lineas[i].strip().startswith(f"{bitacora} "):
+                        ultima_linea_idx = i
+                        break
+
+                if ultima_linea_idx != -1:
+                    # Eliminar la última línea de esta bitácora
+                    lineas.pop(ultima_linea_idx)
+
+                    # Reescribir el archivo
+                    with open(self.archivo, "w", encoding="utf-8") as f:
+                        f.writelines(lineas)
+
+                    print(f"Última entrada de {bitacora} borrada.")
                 else:
-                    print(f"El archivo {bitacora}.txt está vacío.")
+                    print(f"No hay entradas para {bitacora}")
             except Exception as e:
                 print(f"Error al modificar el archivo: {e}")
 
@@ -113,7 +191,8 @@ class Bitacora:
 if __name__ == "__main__":
     import sys
 
-    bit = Bitacora("~/Documentos/Nube/bit/", editor="micro", show="cat")
+    # Ahora se especifica la ruta directa al archivo
+    bit = Bitacora("~/Documentos/Nube/bits.txt", editor="micro", show="cat")
 
     args = sys.argv[1:]
 
@@ -125,17 +204,19 @@ if __name__ == "__main__":
     extra = None
     bitacora = args[0]
 
-    if bitacora.startswith(("+", "-", "/")):
+    if bitacora.startswith(("+", "_", "/", "-")):
         extra = bitacora[0]
         bitacora = bitacora[1:]
 
     if len(args) == 1:
         if extra == "+":
             bit.editar(bitacora)
-        elif extra == "-":
-            bit.borrar(bitacora, True)
+        elif extra == "_":
+            bit.borrar(bitacora, True)  # True = borrar todas las entradas
         elif extra == "/":
             bit.directorio(bitacora)
+        elif extra == "-":
+            bit.borrar(bitacora, False)
         else:
             bit.mostrar(bitacora)
         sys.exit(0)
