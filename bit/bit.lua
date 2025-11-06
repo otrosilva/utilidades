@@ -179,7 +179,7 @@ function Bitacora:borrar(bitacora, todo)
 end
 
 -- Ruta de la carpeta que contiene los registros
-local Bit = Bitacora.new("~/iCloud/Docs/bits/", "hx +9999", "cat")
+local Bit = Bitacora.new("~/Documentos/Nube/bit/", "hx +9999", "cat")
 -- local Bit = Bitacora.new("~/bits/", "hx +9999", "cat")
 
 -- arg == 0 -- Cero argumentos: mostrar los archivos en el directorio
@@ -204,6 +204,8 @@ end
 if #arg == 1 then
     if extra == "+" then
         Bit:editar(bitacora)
+    elseif extra == "-" then
+        Bit:borrar(bitacora, true)
     else
         Bit:mostrar(bitacora)
     end

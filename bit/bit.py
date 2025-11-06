@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import subprocess
 from datetime import datetime
@@ -5,13 +6,12 @@ from pathlib import Path
 
 
 class Bitacora:
-    def __init__(self, ruta, editor=None, show=None):
-        # Expande ~ en la ruta
+    def __init__(self, ruta="~/bits/", editor="nano", show="cat"):
         self.ruta = Path(ruta).expanduser()
         if not self.ruta.is_dir():
             print(f"Error: La ruta {self.ruta} no existe o no es un directorio.")
-            return  # Cambiado exit(1) por return
-        self.editor = editor or os.getenv("EDITOR") or "nano"
+            return
+        self.editor = editor or os.getenv("EDITOR")
         self.show = show or "tail"
 
     def config(self):
@@ -35,28 +35,30 @@ class Bitacora:
                 print(file.stem)
         else:
             print("No hay bitácoras")
-        return [f.stem for f in txt_files]
 
     def mostrar(self, bitacora):
         ruta_completa = self.ruta / f"{bitacora}.txt"
         if not ruta_completa.exists():
-            print(f"Error: El archivo {ruta_completa} no existe.")
+            print(f"Archivo {bitacora}.txt no existe.")
             return
         try:
-            subprocess.run(
-                [self.show, str(ruta_completa)], check=False
-            )  # Added check=False
+            _ = subprocess.run([self.show, str(ruta_completa)], check=False)
         except Exception as e:
             print(f"Error al ejecutar el comando {self.show}: {e}")
+
+    def directorio(self, bitacora):
+        ruta_completa = self.ruta / f"{bitacora}.txt"
+        if ruta_completa.exists():
+            print(ruta_completa)
+        else:
+            print(f"Archivo {bitacora}.txt no existe.")
+        return
 
     def editar(self, bitacora):
         ruta_completa = self.ruta / f"{bitacora}.txt"
         try:
-            # Asegurarnos de que el archivo existe antes de editarlo
             ruta_completa.touch(exist_ok=True)
-            resultado = subprocess.run(
-                [self.editor, str(ruta_completa)], check=False
-            )  # Added check=False
+            resultado = subprocess.run([self.editor, str(ruta_completa)], check=False)
             if resultado.returncode == 0:
                 print(f"Archivo {bitacora}.txt editado exitosamente.")
             else:
@@ -67,12 +69,10 @@ class Bitacora:
     def agregar(self, bitacora, texto):
         ruta_completa = self.ruta / f"{bitacora}.txt"
         try:
-            with open(
-                ruta_completa, "a", encoding="utf-8"
-            ) as archivo:  # Added encoding
+            with open(ruta_completa, "a", encoding="utf-8") as archivo:
                 prefijo = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log_entry = f"{prefijo} [{bitacora}]: {texto}\n"
-                archivo.write(log_entry)
+                _ = archivo.write(log_entry)
             print(f"Nueva entrada agregada exitosamente al archivo {bitacora}.txt")
         except Exception as e:
             print(f"Error al abrir o escribir el archivo: {e}")
@@ -97,17 +97,13 @@ class Bitacora:
                 print("Operación de borrado cancelada.")
         else:
             try:
-                with open(
-                    ruta_completa, "r", encoding="utf-8"
-                ) as archivo:  # Added encoding
+                with open(ruta_completa, "r", encoding="utf-8") as archivo:
                     lineas = archivo.readlines()
                 if lineas:
-                    lineas = lineas[:-1]  # borrar última línea
-                    with open(
-                        ruta_completa, "w", encoding="utf-8"
-                    ) as archivo:  # Added encoding
+                    lineas = lineas[:-1]
+                    with open(ruta_completa, "w", encoding="utf-8") as archivo:
                         archivo.writelines(lineas)
-                    print(f"Última línea borrada de {bitacora}")
+                    print(f"Última línea borrada de {bitacora}.txt")
                 else:
                     print(f"El archivo {bitacora}.txt está vacío.")
             except Exception as e:
@@ -117,8 +113,7 @@ class Bitacora:
 if __name__ == "__main__":
     import sys
 
-    # Cambiado para evitar expanduser duplicado
-    bit = Bitacora("~/Documentos/Nube/bit/", editor="nano", show="cat")
+    bit = Bitacora("~/Documentos/Nube/bit/", editor="micro", show="cat")
 
     args = sys.argv[1:]
 
@@ -130,13 +125,17 @@ if __name__ == "__main__":
     extra = None
     bitacora = args[0]
 
-    if bitacora.startswith(("+", "-")):  # Cambiado para mejor legibilidad
+    if bitacora.startswith(("+", "-", "/")):
         extra = bitacora[0]
         bitacora = bitacora[1:]
 
     if len(args) == 1:
         if extra == "+":
             bit.editar(bitacora)
+        elif extra == "-":
+            bit.borrar(bitacora, True)
+        elif extra == "/":
+            bit.directorio(bitacora)
         else:
             bit.mostrar(bitacora)
         sys.exit(0)
