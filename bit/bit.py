@@ -4,12 +4,75 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+try:
+    import tomllib
+except Exception:
+    tomllib = None
+
+
+def cargar_config_tomllib(ruta: Path):
+    with ruta.open("rb") as f:
+        return tomllib.load(f)
+
+
+def cargar_config_simple_toml(ruta: Path):
+    """Parser mínimo: sólo admite líneas key = "value" o key = 'value' y comentarios."""
+    cfg = {}
+    try:
+        text = ruta.read_text(encoding="utf-8")
+    except Exception:
+        return cfg
+    for linea in text.splitlines():
+        linea = linea.strip()
+        if not linea or linea.startswith("#"):
+            continue
+        if "=" not in linea:
+            continue
+        key, val = linea.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        # quitar comillas si existen
+        if (val.startswith('"') and val.endswith('"')) or (
+            val.startswith("'") and val.endswith("'")
+        ):
+            val = val[1:-1]
+        # expandir ~ en rutas
+        if key in ("archivo", "path", "file", "archivo_path"):
+            val = os.path.expanduser(val)
+        cfg[key] = val
+    return cfg
+
+
+def cargar_config(ruta_proporcionada: str | None = None) -> dict:
+    if ruta_proporcionada:
+        ruta = Path(ruta_proporcionada).expanduser()
+    else:
+        ruta_env = os.getenv("BIT_CONFIG")
+        if ruta_env:
+            ruta = Path(ruta_env).expanduser()
+        else:
+            base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+            ruta = base / "bit" / "config.toml"
+    if not ruta.exists():
+        return {}
+    if tomllib is not None:
+        try:
+            return cargar_config_tomllib(ruta)
+        except Exception:
+            return {}
+    else:
+        return cargar_config_simple_toml(ruta)
+
 
 class Bitacora:
-    def __init__(self, archivo="~/Documentos/bits.txt", editor="nano", show="cat"):
+    def __init__(
+        self,
+        archivo="~/Documents/bits.txt",
+        editor="nano",
+        show="cat",
+    ):
         self.archivo = Path(archivo).expanduser()
 
-        # Crear el directorio padre si no existe
         self.archivo.parent.mkdir(parents=True, exist_ok=True)
 
         self.editor = editor or os.getenv("EDITOR")
@@ -32,6 +95,7 @@ class Bitacora:
     def listar(self):
         """Lista todas las bitácoras únicas encontradas en el archivo"""
         if not self.archivo.exists():
+            print("DEBUG: no existe archivo")
             print("No hay bitácoras")
             return
 
@@ -40,7 +104,6 @@ class Bitacora:
             with open(self.archivo, "r", encoding="utf-8") as f:
                 for linea in f:
                     if linea.strip():
-                        # Extraer el nombre de la bitácora (primera palabra)
                         partes = linea.strip().split()
                         if partes:
                             bitacoras.add(partes[0])
@@ -86,11 +149,9 @@ class Bitacora:
                 ]
 
             if lineas_exactas:
-                # Mostrar entradas exactas
                 for linea in lineas_exactas:
                     print(linea)
             else:
-                # Buscar bitácoras que coincidan con el patrón
                 bitacoras_patron = self._obtener_bitacoras_con_patron(bitacora)
 
                 if bitacoras_patron:
@@ -143,7 +204,6 @@ class Bitacora:
             )
             if confirmacion.lower() == "s":
                 try:
-                    # Leer todas las líneas y filtrar
                     with open(self.archivo, "r", encoding="utf-8") as f:
                         lineas = [
                             linea
@@ -151,7 +211,6 @@ class Bitacora:
                             if not linea.strip().startswith(f"{bitacora} ")
                         ]
 
-                    # Reescribir el archivo sin las líneas de la bitácora
                     with open(self.archivo, "w", encoding="utf-8") as f:
                         f.writelines(lineas)
 
@@ -162,11 +221,9 @@ class Bitacora:
                 print("Operación de borrado cancelada.")
         else:
             try:
-                # Leer todas las líneas
                 with open(self.archivo, "r", encoding="utf-8") as f:
                     lineas = f.readlines()
 
-                # Encontrar la última línea de la bitácora
                 ultima_linea_idx = -1
                 for i in range(len(lineas) - 1, -1, -1):
                     if lineas[i].strip().startswith(f"{bitacora} "):
@@ -174,10 +231,7 @@ class Bitacora:
                         break
 
                 if ultima_linea_idx != -1:
-                    # Eliminar la última línea de esta bitácora
                     lineas.pop(ultima_linea_idx)
-
-                    # Reescribir el archivo
                     with open(self.archivo, "w", encoding="utf-8") as f:
                         f.writelines(lineas)
 
@@ -191,8 +245,13 @@ class Bitacora:
 if __name__ == "__main__":
     import sys
 
-    # Ahora se especifica la ruta directa al archivo
-    bit = Bitacora("~/Documentos/Nube/bits.txt", editor="micro", show="cat")
+    cfg = cargar_config()
+
+    archivo_cfg = cfg.get("archivo", "/mnt/c/Users/jfons/Documents/MEGA/@nube/bits.txt")
+    editor_cfg = cfg.get("editor", "micro")
+    show_cfg = cfg.get("show", "cat")
+
+    bit = Bitacora(archivo=archivo_cfg, editor=editor_cfg, show=show_cfg)
 
     args = sys.argv[1:]
 
@@ -212,7 +271,7 @@ if __name__ == "__main__":
         if extra == "+":
             bit.editar(bitacora)
         elif extra == "_":
-            bit.borrar(bitacora, True)  # True = borrar todas las entradas
+            bit.borrar(bitacora, True)
         elif extra == "/":
             bit.directorio(bitacora)
         elif extra == "-":
