@@ -18,7 +18,7 @@ class Bitacora:
         self.editor = editor or os.getenv("EDITOR", "micro")
         self.show = show or "tail"
 
-        # Crear el archivo si no existe
+        # Crear si no existe
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         self.ruta.touch(exist_ok=True)
 
@@ -220,7 +220,7 @@ class Bitacora:
 
 def main():
     bit = Bitacora(
-        "~/Documentos/bits.txt",
+        "~/Documentos/Filen/bits.txt",
         # editor="hx +9999",
         editor="micro",
         show="batcat",

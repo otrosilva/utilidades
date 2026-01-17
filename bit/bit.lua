@@ -2,7 +2,7 @@
 -- bit.lua — bitácoras en un solo archivo (optimizado + regex)
 
 -- ===== CONFIG =====
-local RUTA   = "~/Documentos/bits.txt"
+local RUTA   = "~/Documentos/Filen/bits.txt"
 local EDITOR = "hx +9999"
 
 -- ===== UTILS =====
