@@ -1,5 +1,5 @@
 #!/usr/bin/env lua5.4
--- bit.lua — bitácoras en un solo archivo (optimizado + regex)
+-- bit.lua — bitácoras en un solo archivo 
 
 -- ===== CONFIG =====
 local RUTA   = "~/Documentos/Filen/bits.txt"
@@ -20,7 +20,6 @@ local function tmpfile(name)
     return string.format("%s/bit_%s.tmp", base, name)
 end
 
--- ===== CORE =====
 local function procesar(pref)
     local f = io.open(RUTA, "r")
     if not f then return {}, {} end
@@ -126,7 +125,7 @@ local function borrar(name, all)
     end
 end
 
--- ===== EDITAR BITÁCORA EN TEMPORAL (y reordenar por fecha) =====
+-- Editar btácora en archivo temporal y reordenar por fecha
 local function editar_bitacora(name)
     local exact, names = procesar(name)
     if not names[name] then
@@ -147,7 +146,7 @@ local function editar_bitacora(name)
 
     os.execute(EDITOR .. " " .. tmp)
 
-    -- 1) Leer TODO bits.txt, excluyendo la bitácora editada
+    -- Leer TODO bits.txt, excluyendo la bitácora editada
     local f = io.open(RUTA, "r")
     if not f then
         print("No se pudo reabrir " .. RUTA)
@@ -161,7 +160,7 @@ local function editar_bitacora(name)
     end
     f:close()
 
-    -- 2) Añadir las nuevas líneas de la bitácora desde el temporal
+    -- Añadir las nuevas líneas de la bitácora desde el temporal
     tf = io.open(tmp, "r")
     if tf then
         for l in tf:lines() do
@@ -172,7 +171,7 @@ local function editar_bitacora(name)
         tf:close()
     end
 
-    -- 3) Ordenar todas las líneas por fecha (segunda columna)
+    -- Ordenar todas las líneas por fecha (segunda columna)
     table.sort(lines, function(a, b)
         local fa = a:match("^[^%s]+%s(%d%d%d%d%-%d%d%-%d%d%s%d%d:%d%d:%d%d)")
         local fb = b:match("^[^%s]+%s(%d%d%d%d%-%d%d%-%d%d%s%d%d:%d%d:%d%d)")
@@ -196,7 +195,7 @@ local function editar_bitacora(name)
     f:close()
 end
 
--- ===== MAIN =====
+
 if #arg == 0 then
     listar()
     os.exit(0)
