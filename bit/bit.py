@@ -1,271 +1,339 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-Script para ver, guardar y editar bitácoras en un solo archivo txt.
+bit.py — bitácoras en markdown con opción de importación
+python bit.py                        # listar
+python bit.py nombre                 # mostrar
+python bit.py nombre texto aquí      # agregar
+python bit.py +nombre                # editar en editor
+python bit.py -nombre                # borrar última entrada
+python bit.py @nombre                # borrar sección entera
+python bit.py ++                     # abrir archivo completo
+python bit.py --migrar ruta.txt
+python bit.py --importar nota.txt
+python bit.py --importar -           # desde stdin
 """
-
-import os
-import pathlib
-import subprocess
+import re
 import sys
+import subprocess
+import tempfile
+import os
 from datetime import datetime
+from pathlib import Path
+
+# ===== CONFIG =====
+RUTA   = Path("~/Documentos/Filen/Obsidian/bits.md").expanduser()
+EDITOR = "hx +9999"
+
+# Patrón de timestamp: YYYY-MM-DD HH:MM:SS
+RE_TS    = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+# Patrón para normalizar fechas iOS: "2026:05:06 19:41" o "2026-05-06 19:41"
+RE_FECHA = re.compile(r"(\d{4})[:\-](\d{2})[:\-](\d{2})\s+(\d{2}):(\d{2})")
 
 
-class Bitacora:
-    def __init__(self, ruta="~/bits.txt", editor="micro", show="tail"):
-        self.ruta = pathlib.Path(ruta).expanduser()
-        self.editor = editor or os.getenv("EDITOR", "micro")
-        self.show = show or "tail"
+# ===== TIPOS =====
+def entrada(ts: str, text: str) -> dict:
+    return {"ts": ts, "text": text}
 
-        # Crear si no existe
-        self.ruta.parent.mkdir(parents=True, exist_ok=True)
-        self.ruta.touch(exist_ok=True)
+def ahora() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # --- Depuración
-    def config(self):
-        print("--- Atributos de la instancia ---")
-        for k, v in vars(self).items():
-            print(f"{k}: {v}")
-        print("--- Métodos de la clase ---")
-        for m in dir(self):
-            if callable(getattr(self, m)) and not m.startswith("_"):
-                print(f"{m}: method")
-        print("--- Fin de la Configuración ---")
 
-    # --- Listar bitácoras únicas
-    def listar(self, parcial=""):
-        lista = []
+# ===== MARKDOWN PARSE / SERIALIZE =====
+# Formato en disco:
+#   # nombre
+#   - YYYY-MM-DD HH:MM:SS: texto
 
-        with self.ruta.open("r", encoding="utf-8") as f:
-            for linea in f:
-                linea = linea.strip()
-                if not linea:
-                    continue
-                nombre = linea.split(maxsplit=1)[0]
-                if nombre not in lista:
-                    if parcial:
-                        if nombre.startswith(parcial):
-                            lista.append(nombre)
-                    else:
-                        lista.append(nombre)
+def _parse_linea_entrada(line: str) -> dict | None:
+    """Parsea '- YYYY-MM-DD HH:MM:SS: texto' → entrada, o None si no encaja."""
+    if not line.startswith("- "):
+        return None
+    rest = line[2:]
+    # timestamp fijo de 19 chars, seguido de ": "
+    if len(rest) > 21 and rest[19] == ":" and rest[20] == " ":
+        ts, text = rest[:19], rest[21:]
+        if RE_TS.match(ts):
+            return entrada(ts, text)
+    return None
 
-        if lista:
-            for b in lista:
-                print(b)
-        else:
-            print("No hay bitácoras")
 
-        return lista
+def parse_md() -> tuple[dict, list, dict]:
+    """Lee RUTA y devuelve (data, order, lower).
+    data  : { name: [entrada, ...] }
+    order : nombres en orden de aparición
+    lower : { name.lower(): name_canonical }
+    """
+    data, order, lower = {}, [], {}
+    cur = None
 
-    # --- Mostrar entradas o sugerencias
-    def mostrar(self, bitacora):
-        lineas = []
-        sugerencias = set()
+    try:
+        with RUTA.open(encoding="utf-8") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                if line.startswith("# "):
+                    name = line[2:].strip()
+                    if name and " " not in name:
+                        cur = name
+                        if cur not in data:
+                            data[cur] = []
+                            order.append(cur)
+                            lower[cur.lower()] = cur
+                elif cur:
+                    e = _parse_linea_entrada(line)
+                    if e:
+                        data[cur].append(e)
+    except FileNotFoundError:
+        pass
 
-        with self.ruta.open("r", encoding="utf-8") as f:
-            for linea in f:
-                linea = linea.rstrip("\n")
-                if not linea:
-                    continue
-                nombre = linea.split(maxsplit=1)[0]
+    return data, order, lower
 
-                if nombre == bitacora:
-                    lineas.append(linea)
 
-                if nombre.startswith(bitacora):
-                    sugerencias.add(nombre)
+def write_md(data: dict, order: list) -> None:
+    try:
+        with RUTA.open("w", encoding="utf-8") as f:
+            for i, name in enumerate(sorted(n for n in order if n in data)):
+                if i > 0:
+                    f.write("\n")
+                f.write(f"# {name}\n")
+                for e in sorted(data[name], key=lambda e: e["ts"]):
+                    f.write(f"- {e['ts']}: {e['text']}\n")
+    except OSError as err:
+        sys.exit(f"Error: no se pudo escribir en {RUTA}: {err}")
 
-        if lineas:
-            for l in lineas:
-                print(l)
+
+# ===== RESOLUCIÓN DE NOMBRES =====
+def resolver(name: str, data: dict, order: list, lower: dict) -> tuple[str | None, list]:
+    """Resuelve nombre canónico: exacto → case-insensitive → prefijo.
+    Devuelve (canon, sugerencias).
+    """
+    if name in data:
+        return name, []
+    canon = lower.get(name.lower())
+    if canon:
+        return canon, []
+    sugg = [n for n in order if n.lower().startswith(name.lower())]
+    return None, sugg
+
+
+def _no_encontrado(name: str, sugg: list) -> None:
+    """Imprime sugerencias o mensaje de no encontrado."""
+    if sugg:
+        print(f"¿Quisiste decir: {', '.join(sugg)}?")
+    else:
+        print(f"No hay entradas para {name}")
+
+
+def _quitar_seccion(data: dict, order: list, name: str) -> None:
+    """Elimina una sección de data y order."""
+    del data[name]
+    order[:] = [n for n in order if n != name]
+
+
+# ===== COMANDOS =====
+def listar() -> None:
+    data, order, _ = parse_md()
+    if not order:
+        print("No hay bitácoras")
+        return
+    for name in sorted(order):
+        print(f"{name:<20} {len(data[name])} entradas")
+
+
+def mostrar(name: str) -> None:
+    data, order, lower = parse_md()
+    canon, sugg = resolver(name, data, order, lower)
+    if canon:
+        for e in data[canon]:
+            print(f"{e['ts']}: {e['text']}")
+    else:
+        _no_encontrado(name, sugg)
+
+
+def agregar(name: str, text: str) -> None:
+    data, order, lower = parse_md()
+    canon, sugg = resolver(name, data, order, lower)
+    name = canon or (sugg[0] if len(sugg) == 1 else name)
+
+    if name not in data:
+        data[name] = []
+        order.append(name)
+
+    data[name].append(entrada(ahora(), text))
+    write_md(data, order)
+
+
+def borrar(name: str, todo=False) -> None:
+    data, order, lower = parse_md()
+    canon, sugg = resolver(name, data, order, lower)
+
+    if not canon:
+        _no_encontrado(name, sugg)
+        return
+
+    name = canon
+    if todo:
+        if input(f"¿Borrar TODAS las entradas de {name}? (s/n): ") != "s":
             return
+        _quitar_seccion(data, order, name)
+    else:
+        entries = data[name]
+        if not entries:
+            print(f"No hay entradas en {name}")
+            return
+        last = entries.pop()
+        print(f"{name} {last['ts']}: {last['text']}")
+        if not entries:
+            _quitar_seccion(data, order, name)
 
-        if sugerencias:
-            print("Bitácoras:")
-            for b in sorted(sugerencias):
-                print(b)
-        else:
-            print(f"No hay entradas para {bitacora}")
+    write_md(data, order)
 
 
-    def editar(self):
-        """
-        Abrir el archivo completo bits.txt con el editor
-        (equivalente al '++' de tu script Lua).
-        """
-        subprocess.run([*self.editor.split(), str(self.ruta)])
+def editar(name: str) -> None:
+    data, order, lower = parse_md()
+    canon, sugg = resolver(name, data, order, lower)
 
-    # --- Editar archivo único
-    def _tmpfile(self, name: str) -> pathlib.Path:
-        base = pathlib.Path(os.getenv("TMPDIR") or "/tmp")
-        return base / f"bit_{name}.tmp"
+    if not canon:
+        _no_encontrado(name, sugg)
+        sys.exit(1)
 
-    def editar_bitacora(self, name: str):
-        """
-        Equivalente a editar_bitacora(name) de Lua:
-        - Edita solo esa bitácora en un archivo temporal
-        - Reconstruye bits.txt reinsertando lo editado
-        - Ordena todo por fecha (segunda columna)
-        """
+    name = canon
+    tmp = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / f"bit_{name}.tmp"
 
-        # 1) Comprobar que existe esa bitácora
-        existe = False
-        lineas_exactas = []
-        with self.ruta.open("r", encoding="utf-8") as f:
-            for linea in f:
-                linea = linea.rstrip("\n")
-                if not linea:
+    with tmp.open("w", encoding="utf-8") as f:
+        for e in data[name]:
+            f.write(f"- {e['ts']}: {e['text']}\n")
+
+    subprocess.call(f"{EDITOR} {tmp}", shell=True)
+
+    try:
+        with tmp.open(encoding="utf-8") as f:
+            data[name] = [e for line in f if (e := _parse_linea_entrada(line.rstrip("\n")))]
+    except FileNotFoundError:
+        pass
+
+    write_md(data, order)
+
+
+# ===== IMPORTAR / MIGRAR =====
+def migrar(txt_path: str) -> None:
+    path = Path(txt_path).expanduser()
+    data, order = {}, []
+
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                # formato: nombre YYYY-MM-DD HH:MM:SS: texto
+                parts = line.strip().split(" ", 1)
+                if len(parts) < 2:
                     continue
-                if linea.startswith(f"{name} "):
-                    existe = True
-                    lineas_exactas.append(linea)
+                name, rest = parts
+                e = _parse_linea_entrada(f"- {rest}")
+                if e:
+                    if name not in data:
+                        data[name] = []
+                        order.append(name)
+                    data[name].append(e)
+    except FileNotFoundError:
+        sys.exit(f"No se encontró: {path}")
 
-        if not existe:
-            print(f"No existe {name}")
-            sys.exit(1)
+    write_md(data, order)
+    print(f"Migradas {len(order)} secciones a {RUTA}")
 
-        # 2) Volcar SOLO esa bitácora al temporal
-        tmp = self._tmpfile(name)
-        with tmp.open("w", encoding="utf-8") as tf:
-            for l in lineas_exactas:
-                tf.write(l + "\n")
 
-        # 3) Abrir el editor sobre el temporal
-        subprocess.run([*self.editor.split(), str(tmp)])
+def _normalizar_fecha_ios(fecha_raw: str) -> str:
+    """'2026:05:06 19:41' → '2026-05-06 19:41:00', o timestamp actual si no encaja."""
+    m = RE_FECHA.match(fecha_raw)
+    if m:
+        anio, mes, dia, hora, minuto = m.groups()
+        return f"{anio}-{mes}-{dia} {hora}:{minuto}:00"
+    sys.stderr.write(f"  ⚠ fecha no reconocida '{fecha_raw}', usando ahora\n")
+    return ahora()
 
-        # 4) Leer TODO bits.txt, excluyendo la bitácora editada
-        with self.ruta.open("r", encoding="utf-8") as f:
-            todas = [l.rstrip("\n") for l in f]
 
-        restantes = [
-            l for l in todas
-            if not l.startswith(f"{name} ")
-        ]
+def importar_ios(nota_path: str) -> None:
+    """Importa entradas desde nota iOS con formato pipe:
+       YYYY:MM:DD HH:MM | Categoría | subcategoría | texto
+    """
+    f = sys.stdin if nota_path == "-" else None
+    if f is None:
+        path = Path(nota_path).expanduser()
+        try:
+            f = path.open(encoding="utf-8")
+        except FileNotFoundError:
+            sys.exit(f"No se encontró: {path}")
 
-        # 5) Añadir las nuevas líneas desde el temporal
-        nuevas = []
-        if tmp.exists():
-            with tmp.open("r", encoding="utf-8") as tf:
-                for l in tf:
-                    l = l.rstrip("\n")
-                    if l:
-                        nuevas.append(l)
+    data, order, lower = parse_md()
+    imported = skipped = 0
+    primera = True
 
-        # 6) Combinar y ordenar por fecha (segunda columna)
-        def extraer_fecha(linea: str):
-            # formato: nombre YYYY-MM-DD HH:MM:SS: texto
-            #          ^^^^^  ^^^^^^^^^^^^^^^^^^
-            partes = linea.split(maxsplit=2)
-            if len(partes) < 3:
-                return datetime.min
-            fecha_str = partes[1]  # "YYYY-MM-DD"
-            # partes[2] empieza por "HH:MM:SS: ..."
-            resto = partes[2]
-            if len(resto) < 8:
-                return datetime.min
-            hora_str = resto[:8]   # "HH:MM:SS"
-            try:
-                return datetime.strptime(
-                    f"{fecha_str} {hora_str}",
-                    "%Y-%m-%d %H:%M:%S",
-                )
-            except ValueError:
-                return datetime.min
+    with f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                primera = False
+                continue
+            # ignorar cabecera sin pipes (p.ej. "Registro")
+            if primera:
+                primera = False
+                if "|" not in line:
+                    continue
 
-        todas_lineas = restantes + nuevas
-        todas_lineas.sort(key=extraer_fecha)
+            fields = [p.strip() for p in line.split("|")]
+            if len(fields) < 4 or not fields[1]:
+                skipped += 1
+                continue
 
-        # 7) Escribir de vuelta bits.txt
-        with self.ruta.open("w", encoding="utf-8") as f:
-            for l in todas_lineas:
-                f.write(l + "\n")
+            fecha_raw, categoria, sub, texto = fields[:4]
+            ts         = _normalizar_fecha_ios(fecha_raw)
+            entry_text = f"{sub}: {texto}" if sub else texto
 
-    # --- Agregar entrada
-    def agregar(self, bitacora, texto):
-        prefijo = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        linea = f"{bitacora} {prefijo}: {texto}"
+            canon, _ = resolver(categoria, data, order, lower)
+            name = canon or categoria
+            if name not in data:
+                data[name] = []
+                order.append(name)
+                lower[name.lower()] = name
 
-        with self.ruta.open("a", encoding="utf-8") as f:
-            f.write(linea + "\n")
+            e = entrada(ts, entry_text)
+            if any(x["ts"] == ts and x["text"] == entry_text for x in data[name]):
+                skipped += 1
+            else:
+                data[name].append(e)
+                imported += 1
 
-        print(f"Nueva entrada agregada exitosamente para {bitacora}")
-
-    # --- Borrar entradas
-    def borrar(self, bitacora, todo=False):
-        with self.ruta.open("r", encoding="utf-8") as f:
-            lineas = f.readlines()
-
-        if todo:
-            confirm = input(
-                f"¿Borrar TODAS las entradas de {bitacora}? (s/n): "
-            ).lower()
-            if confirm != "s":
-                return
-
-            nuevas = [l for l in lineas if not l.startswith(f"{bitacora} ")]
-        else:
-            nuevas = lineas[:]
-            for i in range(len(nuevas) - 1, -1, -1):
-                if nuevas[i].startswith(f"{bitacora} "):
-                    nuevas.pop(i)
-                    break
-
-        with self.ruta.open("w", encoding="utf-8") as f:
-            f.writelines(nuevas)
+    write_md(data, order)
+    print(f"Importadas {imported} entradas, {skipped} omitidas (duplicadas o inválidas)")
 
 
 # ===== MAIN =====
-
-
-def main():
-    bit = Bitacora(
-        "~/Documentos/Filen/bits.txt",
-        # editor="hx +9999",
-        editor="micro",
-        show="batcat",
-    )
-
+def main() -> None:
     args = sys.argv[1:]
 
-    # Sin argumentos → listar
     if not args:
-        print("Bitácoras:")
-        bit.listar()
-        return
+        listar(); return
 
-    # Caso especial: solo "+"
-    if len(args) == 1 and args[0] == "+":
-        # abrir archivo completo, como en Lua con "++"
-        bit.editar()  # este método abre self.ruta con el editor
-        return
+    if args == ["++"]:
+        subprocess.call(f"{EDITOR} {RUTA}", shell=True); return
 
-    # Prefijos
-    extra = None
-    nombre = args[0]
+    if len(args) == 2 and args[0] == "--migrar":
+        migrar(args[1]); return
 
-    if nombre.startswith(("+", "-")):
-        extra = nombre[0]
-        nombre = nombre[1:]
+    if len(args) == 2 and args[0] == "--importar":
+        importar_ios(args[1]); return
 
-    # Un argumento
+    # sigilo prefijo: +nombre, -nombre, @nombre
+    raw  = args[0]
+    flag = raw[0] if raw and raw[0] in ("+", "-", "@") else None
+    name = raw[1:] if flag else raw
+
     if len(args) == 1:
-        if extra == "+":
-            # +bitacora -> editar solo esa bitácora
-            bit.editar_bitacora(nombre)
-        elif extra == "-":
-            # -bitacora -> borrar solo la última entrada de esa bitácora (como en Lua)
-            bit.borrar(nombre, todo=False)
-        else:
-            bit.mostrar(nombre)
-        return
-
-    # Más de un argumento → agregar
-    texto = " ".join(args[1:])
-    bit.agregar(nombre, texto)
-    if extra == "+":
-        # +bitacora texto -> añadir y luego editar solo esa bitácora
-        bit.editar_bitacora(nombre)
+        if flag == "+":   editar(name)
+        elif flag == "-": borrar(name)
+        elif flag == "@": borrar(name, todo=True)
+        else:             mostrar(name)
+    else:
+        agregar(name, " ".join(args[1:]))
+        if flag == "+":
+            editar(name)
 
 
 if __name__ == "__main__":
