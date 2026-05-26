@@ -1,340 +1,344 @@
 #!/usr/bin/env python3
-"""
-bit.py — bitácoras en markdown con opción de importación
-python bit.py                        # listar
-python bit.py nombre                 # mostrar
-python bit.py nombre texto aquí      # agregar
-python bit.py +nombre                # editar en editor
-python bit.py -nombre                # borrar última entrada
-python bit.py @nombre                # borrar sección entera
-python bit.py ++                     # abrir archivo completo
-python bit.py --migrar ruta.txt
-python bit.py --importar nota.txt
-python bit.py --importar -           # desde stdin
-"""
-import re
+# bit.py — bitácoras en tabla markdown (estilo Unix)
+
 import sys
+import os
+import re
 import subprocess
 import tempfile
-import os
 from datetime import datetime
-from pathlib import Path
 
 # ===== CONFIG =====
-RUTA   = Path("~/Documentos/Filen/Obsidian/bits.md").expanduser()
-EDITOR = "hx +9999"
+RUTA = os.path.expanduser("~/Documentos/Filen/Obsidian/bits.md")
+EDITOR = "micro"          # o "hx", "nano", "vim", etc.
 
-# Patrón de timestamp: YYYY-MM-DD HH:MM:SS
-RE_TS    = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-# Patrón para normalizar fechas iOS: "2026:05:06 19:41" o "2026-05-06 19:41"
-RE_FECHA = re.compile(r"(\d{4})[:\-](\d{2})[:\-](\d{2})\s+(\d{2}):(\d{2})")
+# ===== UTILS =====
+def trim(s: str) -> str:
+    return s.strip()
 
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
 
-# ===== TIPOS =====
-def entrada(ts: str, text: str) -> dict:
-    return {"ts": ts, "text": text}
-
-def ahora() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-# ===== MARKDOWN PARSE / SERIALIZE =====
-# Formato en disco:
-#   # nombre
-#   - YYYY-MM-DD HH:MM:SS: texto
-
-def _parse_linea_entrada(line: str) -> dict | None:
-    """Parsea '- YYYY-MM-DD HH:MM:SS: texto' → entrada, o None si no encaja."""
-    if not line.startswith("- "):
+def ts_to_epoch(ts: str) -> int | None:
+    try:
+        return int(datetime.strptime(ts, "%Y-%m-%d %H:%M").timestamp())
+    except ValueError:
         return None
-    rest = line[2:]
-    # timestamp fijo de 19 chars, seguido de ": "
-    if len(rest) > 21 and rest[19] == ":" and rest[20] == " ":
-        ts, text = rest[:19], rest[21:]
-        if RE_TS.match(ts):
-            return entrada(ts, text)
-    return None
 
+def fmt_diff(secs: int) -> str:
+    if secs < 0:
+        return "?"
+    total_min = secs // 60
+    if total_min == 0:
+        return "0m"
+    d = total_min // 1440
+    h = (total_min % 1440) // 60
+    m = total_min % 60
+    parts = []
+    if d: parts.append(f"{d}d")
+    if h: parts.append(f"{h}h")
+    if m: parts.append(f"{m}m")
+    return "".join(parts) or "0m"
 
-def parse_md() -> tuple[dict, list, dict]:
-    """Lee RUTA y devuelve (data, order, lower).
-    data  : { name: [entrada, ...] }
-    order : nombres en orden de aparición
-    lower : { name.lower(): name_canonical }
-    """
-    data, order, lower = {}, [], {}
-    cur = None
+# ===== PARSE / SERIALIZE =====
+HEADER = "| Fecha | Tipo | Evento | Comentario | Transcurrido |"
+SEP    = "| --- | --- | --- | --- | --- |"
 
+def parse_line(line: str) -> dict | None:
+    line = line.strip()
+    if not line.startswith("|"):
+        return None
+    # Dividir por pipes, ignorar primero y último vacíos
+    fields = [trim(f) for f in line.split("|")[1:-1]]
+    if len(fields) < 5:
+        return None
+    if not re.match(r"\d{4}-\d{2}-\d{2}", fields[0]):
+        return None
+    return {
+        "fecha": fields[0],
+        "tipo": fields[1],
+        "evento": fields[2],
+        "comentario": fields[3],
+        "transcurrido": fields[4],
+    }
+
+def parse_md():
+    entries = []
     try:
-        with RUTA.open(encoding="utf-8") as f:
-            for raw in f:
-                line = raw.rstrip("\n")
-                if line.startswith("# "):
-                    name = line[2:].strip()
-                    if name and " " not in name:
-                        cur = name
-                        if cur not in data:
-                            data[cur] = []
-                            order.append(cur)
-                            lower[cur.lower()] = cur
-                elif cur:
-                    e = _parse_linea_entrada(line)
-                    if e:
-                        data[cur].append(e)
-    except FileNotFoundError:
-        pass
-
-    return data, order, lower
-
-
-def write_md(data: dict, order: list) -> None:
-    try:
-        with RUTA.open("w", encoding="utf-8") as f:
-            for i, name in enumerate(sorted(n for n in order if n in data)):
-                if i > 0:
-                    f.write("\n")
-                f.write(f"# {name}\n")
-                for e in sorted(data[name], key=lambda e: e["ts"]):
-                    f.write(f"- {e['ts']}: {e['text']}\n")
-    except OSError as err:
-        sys.exit(f"Error: no se pudo escribir en {RUTA}: {err}")
-
-
-# ===== RESOLUCIÓN DE NOMBRES =====
-def resolver(name: str, data: dict, order: list, lower: dict) -> tuple[str | None, list]:
-    """Resuelve nombre canónico: exacto → case-insensitive → prefijo.
-    Devuelve (canon, sugerencias).
-    """
-    if name in data:
-        return name, []
-    canon = lower.get(name.lower())
-    if canon:
-        return canon, []
-    sugg = [n for n in order if n.lower().startswith(name.lower())]
-    return None, sugg
-
-
-def _no_encontrado(name: str, sugg: list) -> None:
-    """Imprime sugerencias o mensaje de no encontrado."""
-    if sugg:
-        print(f"¿Quisiste decir: {', '.join(sugg)}?")
-    else:
-        print(f"No hay entradas para {name}")
-
-
-def _quitar_seccion(data: dict, order: list, name: str) -> None:
-    """Elimina una sección de data y order."""
-    del data[name]
-    order[:] = [n for n in order if n != name]
-
-
-# ===== COMANDOS =====
-def listar() -> None:
-    data, order, _ = parse_md()
-    if not order:
-        print("No hay bitácoras")
-        return
-    for name in sorted(order):
-        print(f"{name:<20} {len(data[name])} entradas")
-
-
-def mostrar(name: str) -> None:
-    data, order, lower = parse_md()
-    canon, sugg = resolver(name, data, order, lower)
-    if canon:
-        for e in data[canon]:
-            print(f"{e['ts']}: {e['text']}")
-    else:
-        _no_encontrado(name, sugg)
-
-
-def agregar(name: str, text: str) -> None:
-    data, order, lower = parse_md()
-    canon, sugg = resolver(name, data, order, lower)
-    name = canon or (sugg[0] if len(sugg) == 1 else name)
-
-    if name not in data:
-        data[name] = []
-        order.append(name)
-
-    data[name].append(entrada(ahora(), text))
-    write_md(data, order)
-
-
-def borrar(name: str, todo=False) -> None:
-    data, order, lower = parse_md()
-    canon, sugg = resolver(name, data, order, lower)
-
-    if not canon:
-        _no_encontrado(name, sugg)
-        return
-
-    name = canon
-    if todo:
-        if input(f"¿Borrar TODAS las entradas de {name}? (s/n): ") != "s":
-            return
-        _quitar_seccion(data, order, name)
-    else:
-        entries = data[name]
-        if not entries:
-            print(f"No hay entradas en {name}")
-            return
-        last = entries.pop()
-        print(f"{name} {last['ts']}: {last['text']}")
-        if not entries:
-            _quitar_seccion(data, order, name)
-
-    write_md(data, order)
-
-
-def editar(name: str) -> None:
-    data, order, lower = parse_md()
-    canon, sugg = resolver(name, data, order, lower)
-
-    if not canon:
-        _no_encontrado(name, sugg)
-        sys.exit(1)
-
-    name = canon
-    tmp = Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / f"bit_{name}.tmp"
-
-    with tmp.open("w", encoding="utf-8") as f:
-        for e in data[name]:
-            f.write(f"- {e['ts']}: {e['text']}\n")
-
-    subprocess.call(f"{EDITOR} {tmp}", shell=True)
-
-    try:
-        with tmp.open(encoding="utf-8") as f:
-            data[name] = [e for line in f if (e := _parse_linea_entrada(line.rstrip("\n")))]
-    except FileNotFoundError:
-        pass
-
-    write_md(data, order)
-
-
-# ===== IMPORTAR / MIGRAR =====
-def migrar(txt_path: str) -> None:
-    path = Path(txt_path).expanduser()
-    data, order = {}, []
-
-    try:
-        with path.open(encoding="utf-8") as f:
+        with open(RUTA, "r", encoding="utf-8") as f:
             for line in f:
-                # formato: nombre YYYY-MM-DD HH:MM:SS: texto
-                parts = line.strip().split(" ", 1)
-                if len(parts) < 2:
-                    continue
-                name, rest = parts
-                e = _parse_linea_entrada(f"- {rest}")
+                e = parse_line(line)
                 if e:
-                    if name not in data:
-                        data[name] = []
-                        order.append(name)
-                    data[name].append(e)
+                    entries.append(e)
     except FileNotFoundError:
-        sys.exit(f"No se encontró: {path}")
+        pass
+    return entries
 
-    write_md(data, order)
-    print(f"Migradas {len(order)} secciones a {RUTA}")
+def write_md(entries):
+    # Asegurar directorio
+    os.makedirs(os.path.dirname(RUTA), exist_ok=True)
+    with open(RUTA, "w", encoding="utf-8") as f:
+        f.write("# Registro\n\n")
+        f.write(HEADER + "\n")
+        f.write(SEP + "\n")
+        for e in entries:
+            f.write(f"| {e['fecha']} | {e['tipo']} | {e['evento']} | {e['comentario']} | {e['transcurrido']} |\n")
 
+# ===== CATEGORÍAS =====
+def categorias_existentes(entries):
+    cats = set()
+    for e in entries:
+        if e["tipo"]:
+            cats.add(e["tipo"])
+    return sorted(cats)
 
-def _normalizar_fecha_ios(fecha_raw: str) -> str:
-    """'2026:05:06 19:41' → '2026-05-06 19:41:00', o timestamp actual si no encaja."""
-    m = RE_FECHA.match(fecha_raw)
-    if m:
-        anio, mes, dia, hora, minuto = m.groups()
-        return f"{anio}-{mes}-{dia} {hora}:{minuto}:00"
-    sys.stderr.write(f"  ⚠ fecha no reconocida '{fecha_raw}', usando ahora\n")
-    return ahora()
+# ===== BÚSQUEDA =====
+def eventos_con_prefijo(entries, prefijo):
+    pref = prefijo.lower()
+    seen = set()
+    result = []
+    for e in entries:
+        ev = e["evento"]
+        if ev.lower().startswith(pref):
+            if ev not in seen:
+                seen.add(ev)
+                result.append(ev)
+    return sorted(result)
 
+def ultima_entrada(entries, evento):
+    last = None
+    for e in entries:
+        if e["evento"] == evento:
+            last = e
+    return last
 
-def importar_ios(nota_path: str) -> None:
-    """Importa entradas desde nota iOS con formato pipe:
-       YYYY:MM:DD HH:MM | Categoría | subcategoría | texto
-    """
-    f = sys.stdin if nota_path == "-" else None
-    if f is None:
-        path = Path(nota_path).expanduser()
-        try:
-            f = path.open(encoding="utf-8")
-        except FileNotFoundError:
-            sys.exit(f"No se encontró: {path}")
+# ===== FUNCIONES PRINCIPALES =====
+def mostrar_ayuda():
+    print("""\
+Uso: bit [opciones] [evento] [comentario]
 
-    data, order, lower = parse_md()
-    imported = skipped = 0
-    primera = True
+Opciones:
+  -h, --help          Muestra esta ayuda.
+  -l, --list          Lista todas las bitácoras agrupadas por categoría.
+  <evento>            Muestra todas las entradas del evento especificado.
+  <evento> <comentario>   Añade una nueva entrada al evento (atajo rápido).
+  -e, --edit <evento>   Edita todas las entradas del evento.
+  -a, --add <evento> <comentario>   Añade una entrada (igual que el atajo).
+  -d, --delete <evento>   Borra la última entrada del evento.
+  -D, --delete-all <evento>  Borra TODAS las entradas del evento (pide confirmación).
 
-    with f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                primera = False
-                continue
-            # ignorar cabecera sin pipes (p.ej. "Registro")
-            if primera:
-                primera = False
-                if "|" not in line:
-                    continue
+Ejemplos:
+  bit                          # Muestra resumen por categorías
+  bit gato                     # Muestra todas las entradas de "gato"
+  bit gato "duerme en la silla"  # Añade una entrada rápida
+  bit -a gato "duerme"         # Mismo que arriba
+  bit -e gato                  # Edita las entradas de "gato"
+  bit -d gato                  # Borra la última entrada de "gato"
+  bit -D gato                  # Borra todas las entradas de "gato"
+""")
 
-            fields = [p.strip() for p in line.split("|")]
-            if len(fields) < 4 or not fields[1]:
-                skipped += 1
-                continue
+def listar(entries):
+    if not entries:
+        print("No hay entradas")
+        return
 
-            fecha_raw, categoria, sub, texto = fields[:4]
-            ts         = _normalizar_fecha_ios(fecha_raw)
-            entry_text = f"{sub}: {texto}" if sub else texto
+    by_category = {}
+    for e in entries:
+        cat = e["tipo"]
+        ev = e["evento"]
+        if cat not in by_category:
+            by_category[cat] = {}
+        by_category[cat][ev] = by_category[cat].get(ev, 0) + 1
 
-            canon, _ = resolver(categoria, data, order, lower)
-            name = canon or categoria
-            if name not in data:
-                data[name] = []
-                order.append(name)
-                lower[name.lower()] = name
+    for cat in sorted(by_category.keys()):
+        print()
+        print(f"| {cat} | #   |")
+        print("| --- | --- |")
+        for ev in sorted(by_category[cat].keys()):
+            print(f"| {ev} | {by_category[cat][ev]} |")
 
-            e = entrada(ts, entry_text)
-            if any(x["ts"] == ts and x["text"] == entry_text for x in data[name]):
-                skipped += 1
-            else:
-                data[name].append(e)
-                imported += 1
+def mostrar_evento(entries, evento):
+    found = [e for e in entries if e["evento"] == evento]
+    if not found:
+        print(f"No hay entradas para el evento '{evento}'")
+        return
+    print("| Fecha | Tipo | Evento | Comentario | Transcurrido |")
+    print("| --- | --- | --- | --- | --- |")
+    for e in found:
+        comentario = e["comentario"].replace("|", "\\|")
+        print(f"| {e['fecha']} | {e['tipo']} | {e['evento']} | {comentario} | {e['transcurrido']} |")
 
-    write_md(data, order)
-    print(f"Importadas {imported} entradas, {skipped} omitidas (duplicadas o inválidas)")
+def agregar(entries, evento, comentario):
+    last = ultima_entrada(entries, evento)
+    tipo = last["tipo"] if last else None
 
+    if not tipo:
+        while True:
+            inp = input(f"Categoría para '{evento}' (escribe '?' para ver las existentes): ").strip()
+            if inp == "?":
+                cats = categorias_existentes(entries)
+                if not cats:
+                    print("No hay categorías previas. Puedes escribir una nueva.")
+                else:
+                    print("Categorías existentes:")
+                    for c in cats:
+                        print(f"  - {c}")
+            elif inp:
+                tipo = inp
+                break
+        if not tipo:
+            tipo = "Evento"
+
+    transcurrido = "inicio"
+    if last:
+        last_epoch = ts_to_epoch(last["fecha"])
+        now_epoch = ts_to_epoch(now_ts())
+        if last_epoch and now_epoch:
+            transcurrido = fmt_diff(now_epoch - last_epoch)
+
+    entries.append({
+        "fecha": now_ts(),
+        "tipo": tipo,
+        "evento": evento,
+        "comentario": comentario,
+        "transcurrido": transcurrido,
+    })
+    write_md(entries)
+    print(f"+ {now_ts()} | {tipo} | {evento} | {transcurrido}")
+
+def borrar_ultima(entries, evento):
+    idx = None
+    for i in range(len(entries)-1, -1, -1):
+        if entries[i]["evento"] == evento:
+            idx = i
+            break
+    if idx is None:
+        print(f"No hay entradas para el evento '{evento}'")
+        return
+    removed = entries.pop(idx)
+    write_md(entries)
+    print(f"- {removed['fecha']} | {removed['evento']} | {removed['comentario']}")
+
+def borrar_todo(entries, evento):
+    resp = input(f"¿Borrar TODAS las entradas de '{evento}'? (s/n): ").strip().lower()
+    if resp != "s":
+        return
+    new_entries = [e for e in entries if e["evento"] != evento]
+    write_md(new_entries)
+    print(f"Borradas todas las entradas de '{evento}'")
+
+def editar_evento(entries, evento):
+    # Filtrar entradas del evento
+    event_entries = [e for e in entries if e["evento"] == evento]
+    if not event_entries:
+        print(f"No hay entradas para el evento '{evento}'")
+        return
+
+    # Crear archivo temporal con las entradas
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as tf:
+        temp_name = tf.name
+        tf.write(f"# Editando: {evento}\n")
+        tf.write("# Formato: | fecha | tipo | evento | comentario | transcurrido |\n\n")
+        for e in event_entries:
+            tf.write(f"| {e['fecha']} | {e['tipo']} | {e['evento']} | {e['comentario']} | {e['transcurrido']} |\n")
+    # Abrir editor
+    subprocess.call([EDITOR, temp_name])
+
+    # Leer resultado
+    new_entries = []
+    with open(temp_name, "r", encoding="utf-8") as tf:
+        for line in tf:
+            e = parse_line(line)
+            if e:
+                new_entries.append(e)
+    os.unlink(temp_name)
+
+    # Reemplazar en la lista original
+    result = []
+    replaced = False
+    for e in entries:
+        if e["evento"] != evento:
+            result.append(e)
+        elif not replaced:
+            result.extend(new_entries)
+            replaced = True
+    if not replaced:
+        result.extend(new_entries)
+
+    # Reordenar por fecha
+    result.sort(key=lambda x: x["fecha"])
+    write_md(result)
+    print(f"Editado: {evento}")
 
 # ===== MAIN =====
-def main() -> None:
+def main():
+    # Verificar/crear archivo si no existe
+    if not os.path.exists(RUTA):
+        write_md([])
+
     args = sys.argv[1:]
-
     if not args:
-        listar(); return
+        entries = parse_md()
+        listar(entries)
+        return
 
-    if args == ["++"]:
-        subprocess.call(f"{EDITOR} {RUTA}", shell=True); return
+    # Expandir opciones largas
+    def expand_option(arg):
+        if arg in ("--help",): return "-h"
+        if arg in ("--list",): return "-l"
+        if arg in ("--edit",): return "-e"
+        if arg in ("--add",): return "-a"
+        if arg in ("--delete",): return "-d"
+        if arg in ("--delete-all",): return "-D"
+        return arg
 
-    if len(args) == 2 and args[0] == "--migrar":
-        migrar(args[1]); return
+    first = expand_option(args[0])
+    entries = parse_md()
 
-    if len(args) == 2 and args[0] == "--importar":
-        importar_ios(args[1]); return
-
-    # sigilo prefijo: +nombre, -nombre, @nombre
-    raw  = args[0]
-    flag = raw[0] if raw and raw[0] in ("+", "-", "@") else None
-    name = raw[1:] if flag else raw
-
-    if len(args) == 1:
-        if flag == "+":   editar(name)
-        elif flag == "-": borrar(name)
-        elif flag == "@": borrar(name, todo=True)
-        else:             mostrar(name)
+    if first == "-h":
+        mostrar_ayuda()
+    elif first == "-l":
+        listar(entries)
+    elif first == "-e":
+        if len(args) < 2:
+            print("Error: falta el nombre del evento")
+            mostrar_ayuda()
+            sys.exit(1)
+        editar_evento(entries, args[1])
+    elif first == "-a":
+        if len(args) < 3:
+            print("Error: uso: bit -a <evento> <comentario>")
+            sys.exit(1)
+        agregar(entries, args[1], " ".join(args[2:]))
+    elif first == "-d":
+        if len(args) < 2:
+            print("Error: falta el nombre del evento")
+            sys.exit(1)
+        borrar_ultima(entries, args[1])
+    elif first == "-D":
+        if len(args) < 2:
+            print("Error: falta el nombre del evento")
+            sys.exit(1)
+        borrar_todo(entries, args[1])
     else:
-        agregar(name, " ".join(args[1:]))
-        if flag == "+":
-            editar(name)
-
+        # Sin opción: puede ser "bit evento" o "bit evento comentario"
+        evento = args[0]
+        if len(args) == 1:
+            # Mostrar evento
+            matching = eventos_con_prefijo(entries, evento)
+            if not matching:
+                print(f"No existe ninguna bitácora que empiece por '{evento}'")
+                sys.exit(1)
+            elif len(matching) > 1:
+                print(f"Bitácoras que coinciden con '{evento}':")
+                for ev in matching:
+                    print(f"  - {ev}")
+            else:
+                mostrar_evento(entries, matching[0])
+        else:
+            # Añadir rápido
+            comentario = " ".join(args[1:])
+            agregar(entries, evento, comentario)
 
 if __name__ == "__main__":
     main()
