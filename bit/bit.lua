@@ -152,33 +152,53 @@ local function fmt_diff_colored(secs)
     return s
 end
 
+-- ===== UTF-8 HELPERS =====
+local function utf8_take(s, n)
+    local i, count = 1, 0
+    while i <= #s and count < n do
+        local b = s:byte(i)
+        if     b < 0x80 then i = i + 1
+        elseif b < 0xE0 then i = i + 2
+        elseif b < 0xF0 then i = i + 3
+        else                  i = i + 4 end
+        count = count + 1
+    end
+    return s:sub(1, i - 1)
+end
+
 -- ===== ABREVIATURAS =====
 local function calc_abreviaturas(nombres)
     local abbrevs = {}
     local taken   = {}
-
     for _, nombre in ipairs(nombres) do
-        local lower = nombre:lower()
+        local norm  = normalize(nombre)
         local found = false
-        for start = 1, #lower - 1 do
-            local ab = lower:sub(start, start+1)
+        for start = 1, #norm - 1 do
+            local ab = norm:sub(start, start + 1)
             if not taken[ab] then
-                taken[ab]      = nombre
+                taken[ab]       = nombre
                 abbrevs[nombre] = ab
                 found = true
                 break
             end
         end
         if not found then
-            abbrevs[nombre] = lower:sub(1,2)
+            abbrevs[nombre] = norm:sub(1, 2)
         end
     end
     return abbrevs
 end
 
 local function fmt_grupo_con_abbrev(nombre, abbrev)
-    local resto = nombre:sub(#abbrev+1)
-    return C.abbrev .. abbrev .. RST .. resto
+    local prefijo = utf8_take(nombre, #abbrev)
+    local resto   = nombre:sub(#prefijo + 1)
+    return C.abbrev .. prefijo .. RST .. resto
+end
+
+local function fmt_evento_con_abbrev(nombre, abbrev)
+    local prefijo = utf8_take(nombre, #abbrev)
+    local resto   = nombre:sub(#prefijo + 1)
+    return C.abbrev .. prefijo .. RST .. resto
 end
 
 -- ===== PATHS =====
@@ -330,15 +350,16 @@ local function print_resumen()
         print(C.tree..branch_grupo..RST .. fmt_grupo_con_abbrev(grupo, abbrev) .. C.tree.."/"..RST)
 
         local prefix_grupo = is_last_grupo and "    " or "│   "
+        local ev_abbrevs = calc_abreviaturas(evs)
         for ei, ev in ipairs(evs) do
             local is_last_ev = ei == #evs
             local branch_ev  = is_last_ev and "└── " or "├── "
             local lines      = read_evento(grupo, ev)
             local count      = #lines
             local ultima     = count > 0 and lines[count].fecha or "-"
-            -- construir sin mezclar ANSI con %s para no romper espacios
             local prefijo = C.tree..prefix_grupo..branch_ev..RST
-            local ev_c    = C.event..ev..RST
+            local ab      = ev_abbrevs[ev]
+            local ev_c    = ab and fmt_evento_con_abbrev(ev, ab) or (C.event..ev..RST)
             local cnt_c   = C.count..'('..count..')'..RST
             local ult_c   = C.date..ultima..RST
             print(prefijo..ev_c..'  '..cnt_c..'  '..ult_c)
@@ -357,10 +378,13 @@ local function print_arbol_compacto(grupos_filter)
         local ab        = abbrevs[grupo] or grupo:sub(1,2):lower()
         print(C.tree..branch_g..RST .. fmt_grupo_con_abbrev(grupo, ab) .. C.tree.."/"..RST)
         local evs = get_eventos(grupo)
+        local ev_abbrevs = calc_abreviaturas(evs)
         for ei, ev in ipairs(evs) do
             local is_last_e = ei == #evs
             local branch_e  = is_last_e and "└── " or "├── "
-            print(C.tree..prefix_g..branch_e..RST .. C.event..ev..RST)
+            local ab  = ev_abbrevs[ev]
+            local ev_c = ab and fmt_evento_con_abbrev(ev, ab) or (C.event..ev..RST)
+            print(C.tree..prefix_g..branch_e..RST..ev_c)
         end
     end
 end
@@ -387,6 +411,13 @@ end
 
 local function pedir_evento_interactivo(grupo, prompt)
     local evs = grupo and get_eventos(grupo) or {}
+    local abbrevs = calc_abreviaturas(evs)
+    -- invertir: abbrev -> nombre
+    local abbrev_inv = {}
+    for _, ev in ipairs(evs) do
+        local ab = abbrevs[ev]
+        if ab then abbrev_inv[ab] = ev end
+    end
     while true do
         local p = prompt or ("Evento"..(grupo and " en "..grupo or ""))
         io.write(p.." (? = listar): ")
@@ -395,10 +426,19 @@ local function pedir_evento_interactivo(grupo, prompt)
         if input == "?" then
             if #evs == 0 then print("No hay eventos.")
             else print_arbol_compacto({grupo}) end
-        else
+        elseif input ~= "" then
             local n = tonumber(input)
             if n and evs[n] then return evs[n] end
-            if input ~= "" then return input end
+            -- nombre exacto (normalizado)
+            local norm = normalize(input)
+            for _, ev in ipairs(evs) do
+                if normalize(ev) == norm then return ev end
+            end
+            -- abreviatura de 2 letras
+            local ab_match = abbrev_inv[normalize(input)]
+            if ab_match then return ab_match end
+            -- no reconocido: devolver tal cual (evento nuevo)
+            return input
         end
     end
 end
@@ -452,7 +492,7 @@ local function cmd_add(args)
     if #args == 0 then
         grupo      = pedir_grupo("Grupo")
         evento     = pedir_evento_interactivo(grupo)
-        io.write("Comentario: "); io.flush()
+        io.write("Comentario en "..grupo.."/"..evento..": "); io.flush()
         comentario = leer()
     else
         local g_arg, e_arg = parse_arg(args[1])
@@ -642,8 +682,50 @@ local function resolver_grupo_destino(input, ev_orig)
     return pedir_grupo("Grupo destino")
 end
 
+-- Pide destino interactivo: devuelve grupo_dest, ev_dest
+local function pedir_destino_mv(ev_orig)
+    while true do
+        io.write("Destino ([Grupo/]evento, ? = listar): "); io.flush()
+        local input = leer()
+        if input == "?" then
+            print_arbol_compacto()
+        elseif input ~= "" then
+            -- "Grupo/" explícito → pedir evento dentro de ese grupo
+            if input:match("/$") then
+                local g = find_grupo(input:gsub("/$","")) or titulo(input:gsub("/$",""))
+                local ev_dest = pedir_evento_interactivo(g, "Evento destino en "..g)
+                return g, ev_dest
+            end
+            local g_arg, e_arg = parse_arg(input)
+            if g_arg and e_arg then
+                return g_arg, e_arg
+            elseif e_arg then
+                -- buscar evento existente
+                local found = find_evento(e_arg)
+                if #found == 1 then
+                    return found[1].grupo, found[1].evento
+                elseif #found > 1 then
+                    local g, ev = resolver_grupo(e_arg, found)
+                    return g, ev
+                end
+                -- ¿es abreviatura/nombre de grupo conocido?
+                local g = find_grupo(e_arg)
+                if g then
+                    local ev_dest = pedir_evento_interactivo(g, "Evento destino en "..g)
+                    return g, ev_dest
+                end
+                -- no se reconoce: evento nuevo, heredar grupo origen
+                return nil, e_arg
+            elseif g_arg then
+                local ev_dest = pedir_evento_interactivo(g_arg, "Evento destino en "..g_arg)
+                return g_arg, ev_dest
+            end
+        end
+    end
+end
+
 local function cmd_mv(args)
-    local grupo_orig, ev_orig, n, grupo_dest
+    local grupo_orig, ev_orig, n, grupo_dest, ev_dest
 
     if #args == 0 then
         grupo_orig = pedir_grupo("Grupo origen")
@@ -653,16 +735,8 @@ local function cmd_mv(args)
         print_evento_tabla(grupo_orig, ev_orig)
         io.write("Número de línea a mover: "); io.flush()
         n = tonumber(leer())
-        while true do
-            io.write("Grupo destino (nombre, abreviatura o ?, Grupo/): "); io.flush()
-            local input = leer()
-            if input == "?" then
-                print_arbol_compacto()
-            elseif input ~= "" then
-                grupo_dest = resolver_grupo_destino(input, ev_orig)
-                if grupo_dest then break end
-            end
-        end
+        grupo_dest, ev_dest = pedir_destino_mv(ev_orig)
+
     elseif #args == 1 then
         grupo_orig, ev_orig = resolver_arg(args[1])
         local lines = read_evento(grupo_orig, ev_orig)
@@ -673,25 +747,36 @@ local function cmd_mv(args)
         if input_n == "" then return end
         n = tonumber(input_n)
         if not n then print("Número inválido"); return end
-        while true do
-            io.write("Grupo destino (nombre, abreviatura o ?, Grupo/): "); io.flush()
-            local input = leer()
-            if input == "?" then
-                print_arbol_compacto()
-            elseif input ~= "" then
-                grupo_dest = resolver_grupo_destino(input, ev_orig)
-                if grupo_dest then break end
-            end
-        end
+        grupo_dest, ev_dest = pedir_destino_mv(ev_orig)
+
     elseif #args >= 3 then
+        -- bit mv [Grupo/]evento N [Grupo/]evento_dest
         grupo_orig, ev_orig = resolver_arg(args[1])
         n = tonumber(args[2])
-        if not n then print("Error: uso: bit mv [Grupo/]evento N Grupo_dest"); return end
-        grupo_dest = resolver_grupo_destino(args[3], ev_orig)
-        if not grupo_dest then return end
+        if not n then print("Error: uso: bit mv [Grupo/]evento N [Grupo/]evento_dest"); return end
+        local g_arg, e_arg = parse_arg(args[3])
+        if g_arg and e_arg then
+            grupo_dest, ev_dest = g_arg, e_arg
+        elseif e_arg then
+            local found = find_evento(e_arg)
+            if #found == 1 then
+                grupo_dest, ev_dest = found[1].grupo, e_arg
+            elseif #found > 1 then
+                grupo_dest, _ = resolver_grupo(e_arg, found)
+                ev_dest = e_arg
+            else
+                grupo_dest, ev_dest = grupo_orig, e_arg  -- evento nuevo mismo grupo
+            end
+        else
+            print("Error: uso: bit mv [Grupo/]evento N [Grupo/]evento_dest"); return
+        end
     else
-        print("Error: uso: bit mv [Grupo/]evento N Grupo_dest"); return
+        print("Error: uso: bit mv [Grupo/]evento N [Grupo/]evento_dest"); return
     end
+
+    -- heredar valores si no se especificaron
+    if not ev_dest    then ev_dest    = ev_orig    end
+    if not grupo_dest then grupo_dest = grupo_orig end
 
     if not n then print("Número inválido"); return end
     local lines_orig = read_evento(grupo_orig, ev_orig)
@@ -703,13 +788,13 @@ local function cmd_mv(args)
     local moved = table.remove(lines_orig, n)
     write_evento(grupo_orig, ev_orig, lines_orig)
     mkdirs(grupo_path(grupo_dest))
-    local lines_dest = read_evento(grupo_dest, ev_orig)
+    local lines_dest = read_evento(grupo_dest, ev_dest)
     lines_dest = insert_sorted(lines_dest, moved)
-    write_evento(grupo_dest, ev_orig, lines_dest)
+    write_evento(grupo_dest, ev_dest, lines_dest)
     print(string.format("~ %s%s/%s%s #%d → %s%s/%s%s | %s",
         C.route, grupo_orig, ev_orig, RST,
         n,
-        C.route, grupo_dest, ev_orig, RST,
+        C.route, grupo_dest, ev_dest, RST,
         moved.comentario))
 end
 
@@ -814,35 +899,64 @@ local function cmd_import(archivo)
     print(string.format("Importadas %d entradas desde %s", count, archivo))
 end
 
+
+local function cmd_raw()
+    local rows = {}
+    for _, grupo in ipairs(get_grupos()) do
+        for _, ev in ipairs(get_eventos(grupo)) do
+            local lineas = read_evento(grupo, ev)
+            for i, l in ipairs(lineas) do
+                local trans
+                if i == 1 then
+                    trans = "inicio"
+                else
+                    local e1 = ts_to_epoch(lineas[i-1].fecha)
+                    local e2 = ts_to_epoch(l.fecha)
+                    if e1 and e2 then
+                        trans = fmt_diff(e2 - e1)
+                    else
+                        trans = "?"
+                    end
+                end
+                rows[#rows+1] = {fecha=l.fecha, grupo=grupo, evento=ev,
+                                 comentario=l.comentario, trans=trans}
+            end
+        end
+    end
+    if #rows == 0 then print("No hay entradas"); return end
+    table.sort(rows, function(a, b) return a.fecha < b.fecha end)
+    print("| Fecha | Grupo | Evento | Comentario | Transcurrido |")
+    print("| --- | --- | --- | --- | --- |")
+    for _, r in ipairs(rows) do
+        local comentario = r.comentario:gsub("|", "\\|")
+        print(string.format("| %s | %s | %s | %s | %s |",
+            r.fecha, r.grupo, r.evento, comentario, r.trans))
+    end
+end
+
 local function mostrar_ayuda()
     print(
-        C.header.."bit"..RST.." — bitácoras en bits/Grupo/evento.md\n"..
+        C.header.."bit"..RST.." — bitácoras en formato markdown bits/grupo/evento.md\n"..
+        "      cada entrada es FECHA HORA Comentario\n"..
         "\n"..
+        "Comandos:\n"..
         "  bit                            resumen en árbol\n"..
         "  bit <evento>                   listar entradas\n"..
         "  bit <evento> <comentario>      añadir entrada (atajo de add)\n"..
-        "\n"..
-        "  "..C.plus.."add"..RST.." [Grupo/][evento] [comentario]       añadir entrada\n"..
-        "  a                                       alias de add\n"..
-        "  edit [Grupo/][evento]                   abrir archivo en "..EDITOR.."\n"..
-        "  e                                       alias de edit\n"..
-        "  "..C.minus.."rm"..RST.."  [Grupo/]evento [N]                   borrar línea N\n"..
-        "  pop [Grupo/]evento                      borrar última línea\n"..
-        "  del Grupo/                              enviar grupo al trash (confirma)\n"..
-        "  del [Grupo/]evento                      enviar evento al trash (confirma)\n"..
-        "  mv  [Grupo/]evento N [Grupo/]ev_dest    mover línea N a otro evento\n"..
-        "  mv  [Grupo/]evento                      listar líneas numeradas\n"..
-        "  dir [Grupo/]evento [Grupo/][evento]     mover archivo completo a otro grupo\n"..
-        "  import <archivo.md>                     importar desde bits.md anterior\n"..
-        "  help, h                                 esta ayuda\n"..
-        "\n"..
-        C.tree.."Grupo/evento"..RST..": si se omite Grupo/ se busca automáticamente.\n"..
-        C.tree.."Grupos"..RST..": referenciables por nombre, número o "..C.abbrev.."ab"..RST.."reviatura (2 letras).\n"..
-        "Sin argumentos en cualquier comando: modo interactivo."
+        "  "..C.plus.."a,add"..RST.." [Grupo/][evento] [comentario]       añadir entrada\n"..
+        "  "..C.plus.."e,edit"..RST.." [Grupo/][evento]                   editar evento\n"..
+        "  "..C.minus.."rm"..RST.."  [Grupo/]evento [N]                    borrar línea N\n"..
+        "  pop [Grupo/]evento                        borrar y muestra última línea\n"..
+        "  del Grupo/                                enviar grupo al trash (confirma)\n"..
+        "  del [Grupo/]evento                        enviar evento al trash (confirma)\n"..
+        "  mv  [Grupo/]evento N [Grupo/]evento_dest  mover línea N a otro evento\n"..
+        "  dir [Grupo/]evento [Grupo/][evento]       mover archivo completo a otro grupo\n"..
+        "  raw                                       tabla markdown global ordenada por fecha\n"..
+        "  import <archivo.md>                       importar desde bits.md anterior\n"..
+        "  h, help                                   Muestra la ayuda\n"..
+        "Sin argumento cada comando usa modo interactivo"
     )
 end
-
--- ===== MAIN =====
 local function main(...)
     local args = {...}
     mkdirs(BASE)
@@ -860,6 +974,7 @@ local function main(...)
     elseif cmd == "del"                   then cmd_del(rest)
     elseif cmd == "mv"                    then cmd_mv(rest)
     elseif cmd == "dir"                   then cmd_dir(rest)
+    elseif cmd == "raw"                   then cmd_raw()
     elseif cmd == "import"                then
         if #rest < 1 then print("Error: uso: bit import <archivo.md>"); os.exit(1) end
         cmd_import(rest[1])
