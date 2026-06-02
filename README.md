@@ -6,6 +6,11 @@ Para registrar cualquier tipo de eventos al estilo log.
 ```
 ./bit.py -h
 ```
+
+## lingvo.py -- texto a voz ruso@español
+Convierte líneas de texto ruso@español, sólo ruso o español a voz. 
+Si hay archivo cover.png o cover.jpg lo usa para el mp3.
+
 ## son.lua -- Si o No
 Regresa 0 si se responde con OpciónSi o la primera letra, de lo contrario 1
 
@@ -16,6 +21,7 @@ Un bot para avisar si hay cambios en sitios web.
 lua bot.lua chat_id url1 url2 ..
 sh bot.sh chat_id url1 url2 ..
 ```
+
 ## status.sh
 Envía un reporte diario del servidor por telegram.
 

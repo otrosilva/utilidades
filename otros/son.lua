@@ -1,4 +1,4 @@
-#!/usr/bin/env lua
+#!/usr/bin/env luajit
 
 function validar(si, respuesta)
 	-- Validar respuesta a si, el resto no

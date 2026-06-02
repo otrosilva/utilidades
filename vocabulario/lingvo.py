@@ -1,7 +1,7 @@
 #!/bin/env python3
 """
-lingvo.py - Generador de audio RU + ES con descarga automática de voces
-Entrada: archivo.txt (líneas: ruso@español)
+lingvo.py - Generador de audio RU + ES con detección de idioma y carátula optimizada
+Entrada: archivo.txt (líneas: ruso@español, o líneas de un solo idioma)
 Salida: archivo.mp3
 """
 
@@ -55,12 +55,16 @@ def asegurar_modelo(modelo_path: Path, url_base: str):
             archivo.parent.mkdir(parents=True, exist_ok=True)
             print(f"Descargando componente necesario: {archivo.name}...", flush=True)
             try:
-                # Descarga directa vía HTTP
                 urllib.request.urlretrieve(url, archivo)
             except Exception as e:
                 if archivo.exists():
                     archivo.unlink()
                 die(f"No se pudo descargar {url}.\nDetalle: {e}")
+
+
+def es_ruso(texto: str) -> bool:
+    """Detecta si el texto contiene caracteres del alfabeto cirílico."""
+    return any('\u0400' <= char <= '\u04FF' for char in texto)
 
 
 def generar_audio_piper(texto: str, modelo: Path, output_wav: Path):
@@ -90,22 +94,38 @@ def main():
     for cmd in ("sox", "ffmpeg", PIPER_CMD):
         check_cmd(cmd)
 
-    # Validar o autodescargar los modelos de voz necesarios de forma segura
+    # Validar o autodescargar los modelos de voz necesarios
     asegurar_modelo(RU_MODEL, RU_URL)
     asegurar_modelo(ES_MODEL, ES_URL)
 
     base_name = input_file.stem
 
-    # Filtrar y preparar líneas válidas
-    lines = [
-        line for line in input_file.read_text(encoding="utf-8").splitlines()
-        if "@" in line and line.strip()
+    # Leer todas las líneas no vacías
+    raw_lines = [
+        line.strip() for line in input_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
     
-    if not lines:
-        die("El archivo de vocabulario está vacío o no contiene el separador '@'")
+    if not raw_lines:
+        die("El archivo de vocabulario está vacío")
 
-    total_steps = len(lines) * 2
+    # Analizar qué bloques de audio necesitamos generar por cada línea
+    tareas = []
+    for line in raw_lines:
+        if "@" in line:
+            ru, es = (s.strip() for s in line.split("@", 1))
+            if ru: tareas.append(("RU", ru))
+            if es: tareas.append(("ES", es))
+        else:
+            if es_ruso(line):
+                tareas.append(("RU", line))
+            else:
+                tareas.append(("ES", line))
+
+    total_steps = len(tareas)
+    if total_steps == 0:
+        die("No se encontraron frases válidas para procesar")
+
     current_step = 0
 
     with tempfile.TemporaryDirectory(prefix="lingvo_") as tmp:
@@ -113,28 +133,16 @@ def main():
         audio_files = []
         index = 1000
 
-        for line in lines:
-            ru, es = (s.strip() for s in line.split("@", 1))
-            if not ru or not es:
-                continue
-
-            # ---------- GENERAR RUSO ----------
+        for idioma, texto in tareas:
             current_step += 1
-            print(f"[{current_step}/{total_steps}] RU: {ru}", flush=True)
+            print(f"[{current_step}/{total_steps}] {idioma}: {texto}", flush=True)
             
             index += 1
-            wav_ru = tmpdir / f"{index}.wav"
-            generar_audio_piper(ru, RU_MODEL, wav_ru)
-            audio_files.append(str(wav_ru))
-
-            # ---------- GENERAR ESPAÑOL ----------
-            current_step += 1
-            print(f"[{current_step}/{total_steps}] ES: {es}", flush=True)
+            wav_out = tmpdir / f"{index}.wav"
             
-            index += 1
-            wav_es = tmpdir / f"{index}.wav"
-            generar_audio_piper(es, ES_MODEL, wav_es)
-            audio_files.append(str(wav_es))
+            modelo = RU_MODEL if idioma == "RU" else ES_MODEL
+            generar_audio_piper(texto, modelo, wav_out)
+            audio_files.append(str(wav_out))
 
         # ---------- CONCATENACIÓN TOTAL ----------
         print("Unificando pistas de audio...", flush=True)
@@ -152,8 +160,21 @@ def main():
         print("Compilando archivo MP3 con metadatos...", flush=True)
         ffmpeg_cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(wav_master)]
 
-        if Path("cover.jpg").exists():
-            ffmpeg_cmd += ["-i", "cover.jpg", "-map", "1"]
+        # Buscar cover en formatos comunes dentro del directorio actual
+        cover_path = None
+        for ext in (".jpg", ".jpeg", ".png"):
+            img_test = Path(f"cover{ext}")
+            if img_test.exists():
+                cover_path = img_test
+                break
+
+        if cover_path:
+            # -vf redimensiona a 300x300, mantiene aspecto y añade fondo negro si no era cuadrada
+            ffmpeg_cmd += [
+                "-i", str(cover_path), 
+                "-map", "1",
+                "-vf", "scale=300:300:force_original_aspect_ratio=decrease,pad=300:300:(ow-iw)/2:(oh-ih)/2:black"
+            ]
 
         ffmpeg_cmd += [
             "-map", "0",
