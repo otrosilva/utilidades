@@ -1,0 +1,39 @@
+graph TD
+    A([Inicio]) --> B[Validar argumentos y dependencias <br><i>sox, ffmpeg, piper</i>]
+    B --> C[Comprobar y descargar modelos si faltan <br><i>ru_RU-denis-medium y es_ES-sharvard-medium</i>]
+    C --> D[Leer y filtrar archivo de vocabulario <br><i>Filtrar líneas válidas con @</i>]
+    
+    %% Bucle de Procesamiento
+    D --> E[Crear Directorio Temporal]
+    E --> F[<b>Bucle:</b> Por cada línea válida en el archivo]
+    
+    subgraph Procesamiento por Línea
+        F --> G1[Generar Ruso en Piper]
+        G1 --> G2[Guardar temporal WAV]
+        
+        F --> H1[Generar Español en Piper]
+        H1 --> H2[Guardar temporal WAV]
+    end
+    
+    G2 --> I{¿Quedan más líneas?}
+    H2 --> I
+    I -- Sí --> F
+    
+    %% Compilación final
+    I -- No --> J[<b>Concatenación con SoX:</b><br>Unir todos los WAVs intermedios<br>Forzar 22050Hz, Mono, 16-bit]
+    J --> K{¿Existe cover.jpg?}
+    
+    K -- Sí --> L[<b>Ffmpeg:</b> Incrustar portada + Compresión MP3<br>Añadir metadatos de título, artista y álbum]
+    K -- No --> M[<b>Ffmpeg:</b> Compresión MP3 directa<br>Añadir metadatos de título, artista y álbum]
+    
+    L --> N[Limpieza: Borrar directorio temporal]
+    M --> N
+    N --> O([Fin: Archivo .mp3 listo])
+
+    %% Estilos visuales
+    style A fill:#fff,stroke:#333,stroke-width:2px
+    style O fill:#fff,stroke:#333,stroke-width:2px
+    style F fill:#f9f,stroke:#333,stroke-width:1px
+    style J fill:#bbf,stroke:#333,stroke-width:2px
+    style L fill:#bfb,stroke:#333,stroke-width:1px
+    style M fill:#bfb,stroke:#333,stroke-width:1px

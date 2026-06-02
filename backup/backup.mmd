@@ -1,0 +1,12 @@
+graph TD
+    A([Inicio]) --> B[Conexión SSH única]
+    B --> C[Remoto: Crear to_backup.txt y to_exclude.txt si no existen]
+    D --> E[Remoto: Generar stream 'tar' aplicando to_exclude.txt y .gitignore]
+    C --> D[Remoto: Leer rutas de to_backup.txt y patrones de to_exclude.txt]
+    E --> F[Local: Separar metadata del binario recibido]
+    F --> G[Local: Guardar archivo .tgz]
+    G --> H[Local: Mostrar comando de verificación corto]
+    H --> I([Fin Respaldo])
+
+    style A fill:#fff,stroke:#333,stroke-width:2px
+    style I fill:#fff,stroke:#333,stroke-width:2px
