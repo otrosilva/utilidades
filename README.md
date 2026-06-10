@@ -1,12 +1,5 @@
 # Algunos scripts útiles
 
-## bit.py -- una bitácora estilo log
-Para registrar cualquier tipo de eventos al estilo log.
-- Uso:
-```
-./bit.py -h
-```
-
 ## lingvo.py -- texto a voz ruso@español
 Convierte líneas de texto ruso@español, sólo ruso o español a voz. 
 Si hay archivo cover.png o cover.jpg lo usa para el mp3.
@@ -16,6 +9,7 @@ Regresa 0 si se responde con OpciónSi o la primera letra, de lo contrario 1
 
 ## bot.lua/bot.sh
 Un bot para avisar si hay cambios en sitios web.
+
  - Uso:
  ```
 lua bot.lua chat_id url1 url2 ..
@@ -27,6 +21,7 @@ Envía un reporte diario del servidor por telegram.
 
 ## backup.sh
 Se usa para respaldar servidores de forma sencilla. Si no existen, crea dos archivos en el servidor remoto: to_backup.txt, to_exclude.txt. Si existen, usa el contenido para saber que respaldar, y que excluir de los respaldos.
+
 - Uso:
 ```
  sh backup.sh [--dry-run] IP/hostname
@@ -34,6 +29,7 @@ Se usa para respaldar servidores de forma sencilla. Si no existen, crea dos arch
 
 ## telegram.sh
 Se usa para enviar mensajes usando la api de telegram, se debe usar el archivo de configuración telegram.config.
+
 - Uso:
 ```
 sh telegram.sh mensaje
