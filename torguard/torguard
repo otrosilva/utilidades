@@ -20,6 +20,7 @@ EDITOR="${EDITOR:-micro}"
 
 EXCLUDE_FILE="$HOME/.config/tor/exclude-domains"
 EXCLUDE_ROUTES_FILE="$HOME/.config/tor/exclude-routes.active"
+BRIDGES_FILE="$HOME/.config/tor/bridges.txt"
 
 # ── Colores ────────────────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m' D='\033[0m'
@@ -115,7 +116,6 @@ CookieAuthentication 1
 DNSPort $SOCKS_HOST:5353
 DataDirectory $HOME/.config/tor/data
 Log notice file $TORLOG
-PreferIPv6 0
 EOF
         ok "Creado $TORRC. Carga puentes con: torguard fetch"
         return 0
@@ -129,11 +129,65 @@ EOF
     _append_if_missing '^DNSPort'             "DNSPort $SOCKS_HOST:5353"                 && changed=true
     _append_if_missing '^DataDirectory'       "DataDirectory $HOME/.config/tor/data"   && changed=true
     _append_if_missing '^Log'                 "Log notice file $TORLOG"                && changed=true
-    _append_if_missing '^PreferIPv6'          "PreferIPv6 0"                          && changed=true
+
+    # PreferIPv6 no es una opción válida de Tor; si quedó de una versión anterior
+    # del script, la eliminamos para no romper el parseo del torrc.
+    if grep -qE '^PreferIPv6' "$TORRC" 2>/dev/null; then
+        sed -i '/^PreferIPv6/d' "$TORRC"
+        warn "Eliminada línea inválida 'PreferIPv6' de torrc (no es una opción real de Tor)"
+        changed=true
+    fi
+
+    if ! grep -qE '^CircuitBuildTimeout' "$TORRC" 2>/dev/null; then
+        sed -i '/^# --- Circuitos/a CircuitBuildTimeout 5' "$TORRC"
+        changed=true
+    fi
+
+    if ! grep -qE '^LearnCircuitBuildTimeout' "$TORRC" 2>/dev/null; then
+        sed -i '/^CircuitBuildTimeout/a LearnCircuitBuildTimeout 0' "$TORRC"
+        changed=true
+    fi
 
     if $changed; then
         ok "torrc completado con las líneas mínimas que faltaban"
     fi
+    return 0
+}
+
+_ensure_transport_plugins() {
+    [ -f "$TORRC" ] || return 0
+
+    local need_obfs4=false need_wt=false
+    grep -qE '^Bridge obfs4 '     "$TORRC" 2>/dev/null && need_obfs4=true
+    grep -qE '^Bridge webtunnel ' "$TORRC" 2>/dev/null && need_wt=true
+
+    local changed=false
+
+    if $need_obfs4 && ! grep -qE '^ClientTransportPlugin obfs4 exec ' "$TORRC" 2>/dev/null; then
+        local obfs4_bin
+        obfs4_bin=$(_find_binary obfs4proxy) || obfs4_bin=""
+        if [ -n "$obfs4_bin" ]; then
+            sed -i "/^UseBridges/a ClientTransportPlugin obfs4 exec $obfs4_bin" "$TORRC"
+            warn "Añadida línea faltante: ClientTransportPlugin obfs4 exec $obfs4_bin"
+            changed=true
+        else
+            warn "Hay puentes obfs4 en torrc pero no encontré el binario obfs4proxy; no pude añadir el plugin"
+        fi
+    fi
+
+    if $need_wt && ! grep -qE '^ClientTransportPlugin webtunnel exec ' "$TORRC" 2>/dev/null; then
+        local wt_bin
+        wt_bin=$(_find_binary webtunnel-client) || wt_bin=""
+        if [ -n "$wt_bin" ]; then
+            sed -i "/^UseBridges/a ClientTransportPlugin webtunnel exec $wt_bin" "$TORRC"
+            warn "Añadida línea faltante: ClientTransportPlugin webtunnel exec $wt_bin"
+            changed=true
+        else
+            warn "Hay puentes webtunnel en torrc pero no encontré el binario webtunnel-client; no pude añadir el plugin"
+        fi
+    fi
+
+    $changed && ok "Plugins de transporte sincronizados con los puentes presentes en torrc"
     return 0
 }
 
@@ -244,25 +298,52 @@ _setup_check_tunnel_binaries() {
     fi
 }
 
+_check_both_transports_present() {
+    local has_obfs4=false has_wt=false
+    grep -qE '^Bridge obfs4 '     "$TORRC" 2>/dev/null && has_obfs4=true
+    grep -qE '^Bridge webtunnel ' "$TORRC" 2>/dev/null && has_wt=true
+
+    if $has_obfs4 && $has_wt; then
+        ok "Ambos transportes presentes: obfs4 y webtunnel"
+        return 0
+    fi
+
+    if ! $has_obfs4 && ! $has_wt; then
+        err "No hay puentes obfs4 ni webtunnel en torrc. Ejecuta: torguard fetch"
+        return 1
+    fi
+
+    $has_obfs4 || warn "Faltan puentes obfs4 en torrc (solo hay webtunnel). Ejecuta: torguard fetch obfs4"
+    $has_wt     || warn "Faltan puentes webtunnel en torrc (solo hay obfs4). Ejecuta: torguard fetch webtunnel"
+    warn "Se recomienda mantener ambos transportes activos para mayor resistencia al bloqueo"
+    return 1
+}
+
 cmd_setup() {
     info "Preparando el sistema para torguard..."
     echo "" >&2
 
-    info "[1/4] Chequeando tor.service del sistema..."
+    info "[1/5] Chequeando tor.service del sistema..."
     _setup_check_systemd_tor
     echo "" >&2
 
-    info "[2/4] Chequeando paquetes (tor, obfs4proxy, libcap2-bin)..."
+    info "[2/5] Chequeando paquetes (tor, obfs4proxy, libcap2-bin)..."
     _setup_install_packages
     echo "" >&2
 
-    info "[3/4] Aplicando capabilities (DNSPort para tor, TUN para tun2socks)..."
+    info "[3/5] Aplicando capabilities (DNSPort para tor, TUN para tun2socks)..."
     _ensure_torrc
     _check_tun2socks_caps || true
     echo "" >&2
 
-    info "[4/4] Chequeando binarios de túnel (tun2socks / webtunnel-client)..."
+    info "[4/5] Chequeando binarios de túnel (tun2socks / webtunnel-client)..."
     _setup_check_tunnel_binaries
+    _ensure_transport_plugins
+    echo "" >&2
+
+    info "[5/5] Chequeando $BRIDGES_FILE contra los puentes de torrc..."
+    _check_bridges_file_sync
+    _check_both_transports_present || true
     echo "" >&2
 
     ok "Setup completo."
@@ -733,6 +814,17 @@ cmd_status() {
         echo -e "  Exclusión   : ${G}${n}${D} IPs directas (torguard exclude list)"
     fi
 
+    if [ -f "$BRIDGES_FILE" ]; then
+        local nb
+        nb=$(grep -c "^Bridge " "$BRIDGES_FILE" 2>/dev/null || echo 0)
+        echo -e "  bridges.txt : ${G}${nb}${D} puentes ($BRIDGES_FILE)"
+    fi
+
+    local has_obfs4=false has_wt=false
+    grep -qE '^Bridge obfs4 '     "$TORRC" 2>/dev/null && has_obfs4=true
+    grep -qE '^Bridge webtunnel ' "$TORRC" 2>/dev/null && has_wt=true
+    echo -e "  Transportes : obfs4 $($has_obfs4 && echo -e "${G}sí${D}" || echo -e "${R}no${D}") · webtunnel $($has_wt && echo -e "${G}sí${D}" || echo -e "${R}no${D}")"
+
     if ! t2s_pid_running && [ -f "$T2SLOG" ] && [ -s "$T2SLOG" ]; then
         echo -e "  ${Y}tun2socks no está corriendo. Últimas líneas de $T2SLOG:${D}"
         tail -5 "$T2SLOG" | sed 's/^/    /'
@@ -774,10 +866,130 @@ cmd_t2slog() {
     tail -f "$T2SLOG"
 }
 
-cmd_bridges() {
-    info "Abriendo torrc en $EDITOR..."
-    $EDITOR "$TORRC"
+# ── bridges.txt: espejo persistente de los puentes ─────────────────────────
+
+_ensure_bridges_file() {
+    mkdir -p "$(dirname "$BRIDGES_FILE")"
+    if [ ! -f "$BRIDGES_FILE" ]; then
+        if grep -q "^Bridge " "$TORRC" 2>/dev/null; then
+            {
+                echo "# torguard — puentes (bridges) usados por Tor."
+                echo "# Mismo formato que en torrc. torguard mantiene este archivo actualizado"
+                echo "# automáticamente tras 'fetch' o 'bridges edit', y lo usa como fuente de"
+                echo "# verdad en 'torguard setup' o 'torguard bridges sync' si lo editas a mano."
+                grep "^Bridge " "$TORRC"
+            } > "$BRIDGES_FILE"
+            ok "Creado $BRIDGES_FILE a partir de los puentes actuales de torrc"
+        else
+            cat > "$BRIDGES_FILE" << 'EOF'
+# torguard — puentes (bridges) usados por Tor.
+# Mismo formato que en torrc. torguard mantiene este archivo actualizado
+# automáticamente tras 'fetch' o 'bridges edit', y lo usa como fuente de
+# verdad en 'torguard setup' o 'torguard bridges sync' si lo editas a mano.
+#
+# Bridge obfs4 1.2.3.4:443 FINGERPRINT cert=... iat-mode=0
+# Bridge webtunnel [2001:db8::1]:443 FINGERPRINT url=https://example.com/path ver=0.0.5
+EOF
+            ok "Creado $BRIDGES_FILE (vacío)"
+        fi
+    fi
+}
+
+_bridges_file_lines() {
+    _ensure_bridges_file
+    grep "^Bridge " "$BRIDGES_FILE" 2>/dev/null | sort -u || true
+}
+
+_torrc_bridge_lines() {
+    grep "^Bridge " "$TORRC" 2>/dev/null | sort -u || true
+}
+
+# Vuelca los puentes actuales de torrc en bridges.txt (torrc → bridges.txt).
+_sync_bridges_file_from_torrc() {
+    local lines
+    lines=$(_torrc_bridge_lines)
+    [ -z "$lines" ] && return 0
+
+    mkdir -p "$(dirname "$BRIDGES_FILE")"
+    {
+        echo "# torguard — puentes (bridges) usados por Tor."
+        echo "# Actualizado automáticamente a partir de torrc ($(date '+%Y-%m-%d %H:%M:%S'))."
+        echo "$lines"
+    } > "$BRIDGES_FILE"
+}
+
+# Aplica los puentes de bridges.txt a torrc (bridges.txt → torrc).
+_sync_torrc_from_bridges_file() {
+    local obfs4_lines webtunnel_lines
+    obfs4_lines=$(grep "^Bridge obfs4 " "$BRIDGES_FILE" 2>/dev/null || true)
+    webtunnel_lines=$(grep "^Bridge webtunnel " "$BRIDGES_FILE" 2>/dev/null || true)
+
+    if [ -z "$obfs4_lines" ] && [ -z "$webtunnel_lines" ]; then
+        warn "$BRIDGES_FILE no tiene puentes obfs4/webtunnel válidos, no se sincroniza torrc"
+        return 1
+    fi
+
+    local obfs4_bin wt_bin
+    obfs4_bin=$(_find_binary obfs4proxy) || obfs4_bin=""
+    [ -n "$obfs4_lines" ] && [ -z "$obfs4_bin" ] && warn "No encontré obfs4proxy; no podré añadir ClientTransportPlugin obfs4 automáticamente"
+    wt_bin=$(_find_binary webtunnel-client) || wt_bin=""
+    [ -n "$webtunnel_lines" ] && [ -z "$wt_bin" ] && warn "No encontré webtunnel-client; no podré añadir ClientTransportPlugin webtunnel automáticamente"
+
+    _ensure_torrc
+    _write_bridges_to_torrc "$obfs4_lines" "$webtunnel_lines" "$obfs4_bin" "$wt_bin"
+    ok "torrc sincronizado desde $BRIDGES_FILE"
     reload_tor_bridges
+}
+
+# Compara bridges.txt vs torrc y sincroniza en la dirección correspondiente:
+# - si bridges.txt está vacío y torrc tiene puentes -> bridges.txt se rellena desde torrc
+# - si difieren y bridges.txt tiene contenido -> torrc se actualiza desde bridges.txt
+_check_bridges_file_sync() {
+    _ensure_bridges_file
+    local file_lines torrc_lines
+    file_lines=$(_bridges_file_lines)
+    torrc_lines=$(_torrc_bridge_lines)
+
+    if [ -z "$file_lines" ]; then
+        if [ -n "$torrc_lines" ]; then
+            _sync_bridges_file_from_torrc
+            ok "$BRIDGES_FILE actualizado con los puentes actuales de torrc"
+        else
+            info "$BRIDGES_FILE y torrc no tienen puentes todavía (usa: torguard fetch)"
+        fi
+        return 0
+    fi
+
+    if [ "$file_lines" != "$torrc_lines" ]; then
+        warn "$BRIDGES_FILE difiere de los puentes en torrc"
+        info "Actualizando torrc con los puentes de $BRIDGES_FILE..."
+        _sync_torrc_from_bridges_file
+    else
+        ok "$BRIDGES_FILE ya coincide con torrc"
+    fi
+}
+
+cmd_bridges() {
+    case "${1:-torrc}" in
+        torrc|"")
+            info "Abriendo torrc en $EDITOR..."
+            $EDITOR "$TORRC"
+            reload_tor_bridges
+            _sync_bridges_file_from_torrc
+            ;;
+        file)
+            _ensure_bridges_file
+            info "Abriendo $BRIDGES_FILE en $EDITOR..."
+            $EDITOR "$BRIDGES_FILE"
+            _sync_torrc_from_bridges_file
+            ;;
+        sync)
+            _check_bridges_file_sync
+            ;;
+        *)
+            echo "Uso: torguard bridges {torrc|file|sync}"
+            ;;
+    esac
 }
 
 # ── Fetch ──────────────────────────────────────────────────────────────────
@@ -831,7 +1043,7 @@ sys.stdout.buffer.write(base64.b64decode(data))
         done
 
         if ! $opened; then
-            warn "No se encontró visor de im��genes."
+            warn "No se encontró visor de imágenes."
             warn "La imagen del captcha está en: $tmp_img"
             warn "Ábrela manualmente y luego vuelve aquí."
         fi
@@ -964,7 +1176,7 @@ PYEOF
 }
 
 cmd_fetch() {
-    local transport="${1:-obfs4}"
+    local transport="${1:-both}"
     local valid=("obfs4" "webtunnel" "both")
 
     if [[ ! " ${valid[*]} " =~ " $transport " ]]; then
@@ -1018,6 +1230,10 @@ cmd_fetch() {
     _write_bridges_to_torrc "$obfs4_bridges" "$webtunnel_bridges" "$obfs4_bin" "$wt_bin"
     ok "torrc actualizado"
 
+    info "Actualizando $BRIDGES_FILE..."
+    _sync_bridges_file_from_torrc
+    ok "$BRIDGES_FILE actualizado"
+
     echo "" >&2
     echo -e "${B}Puentes activos:${D}" >&2
     grep "^Bridge" "$TORRC" | while read -r line; do
@@ -1036,8 +1252,8 @@ case "${1:-}" in
     newid)    cmd_newid   ;;
     log)      cmd_log     ;;
     t2slog)   cmd_t2slog  ;;
-    bridges)  cmd_bridges ;;
-    fetch)    cmd_fetch "${2:-obfs4}" ;;
+    bridges)  cmd_bridges "${2:-}" ;;
+    fetch)    cmd_fetch "${2:-both}" ;;
     exclude)  cmd_exclude "${2:-list}" "${3:-}" ;;
     setup)    cmd_setup   ;;
     init)     cmd_init    ;;
@@ -1046,7 +1262,8 @@ case "${1:-}" in
         echo ""
         echo "  setup           Preparar el sistema: detiene tor.service si está activo,"
         echo "                  instala tor/obfs4proxy/libcap2-bin si faltan, prepara permisos necesarios"
-        echo "                  para DNSPort y para tun2socks, y chequea binarios de túnel"
+        echo "                  para DNSPort y para tun2socks, chequea binarios de túnel, y sincroniza"
+        echo "                  torrc con \$HOME/.config/tor/bridges.txt si difieren"
         echo "  init            Compilar tun2socks y webtunnel-client desde fuente (go install/build)"
         echo "  enable          Activar Tor + tun2socks (tráfico global)"
         echo "  disable         Desactivar y restaurar red"
@@ -1054,15 +1271,18 @@ case "${1:-}" in
         echo "  newid           Nueva identidad / nueva IP"
         echo "  log             Ver log de Tor en tiempo real"
         echo "  t2slog          Ver log de tun2socks en tiempo real"
-        echo "  bridges         Editar puentes en $EDITOR"
-        echo "  fetch           Obtener puentes obfs4 via Moat (con captcha)"
-        echo "  fetch obfs4     Obtener puentes obfs4"
-        echo "  fetch webtunnel Obtener puentes webtunnel"
-        echo "  fetch both      obfs4 (primario) + webtunnel (respaldo)"
+        echo "  bridges         Editar puentes en torrc con \$EDITOR (por defecto)"
+        echo "  bridges torrc   Editar puentes directo en torrc (igual que 'bridges' solo)"
+        echo "  bridges file    Editar bridges.txt y sincronizar torrc desde ahí"
+        echo "  bridges sync    Comparar bridges.txt vs torrc y sincronizar torrc si difieren"
+        echo "  fetch           Obtener puentes obfs4 + webtunnel via Moat (con captcha, por defecto ambos)"
+        echo "  fetch obfs4     Obtener solo puentes obfs4"
+        echo "  fetch webtunnel Obtener solo puentes webtunnel"
+        echo "  fetch both      obfs4 + webtunnel (igual que 'fetch' sin argumentos)"
         echo "  exclude list           Ver dominios que van directo, sin Tor"
         echo "  exclude add <dominio>  Añadir dominio a la exclusión"
         echo "  exclude remove <dom>   Quitar dominio de la exclusión"
-        echo "  exclude edit           Editar la lista en $EDITOR"
+        echo "  exclude edit           Editar la lista en \$EDITOR"
         echo "  exclude refresh        Reresolver y reaplicar rutas (sin bajar Tor)"
         ;;
 esac
