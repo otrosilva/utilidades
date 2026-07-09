@@ -1,0 +1,1117 @@
+#!/bin/bash
+# torguard — Tor como VPN global
+# ~/.local/bin/torguard
+
+set -euo pipefail
+
+# ── Configuración ────────────────────────────────────────────────────────────
+TORRC="$HOME/.config/tor/torrc"
+TORLOG="$HOME/.config/tor/tor.log"
+T2SLOG="$HOME/.config/tor/tun2socks.log"
+TOR_PID="$HOME/.config/tor/tor.pid"
+T2S_PID="$HOME/.config/tor/tun2socks.pid"
+SOCKS_HOST="127.0.0.1"
+SOCKS_PORT="9050"
+CTRL_PORT="9051"
+TUN="tortun0"
+TUN_ADDR="198.18.0.1/15"
+MOAT_URL="https://bridges.torproject.org/moat"
+EDITOR="${EDITOR:-micro}"
+
+EXCLUDE_FILE="$HOME/.config/tor/exclude-domains"
+EXCLUDE_ROUTES_FILE="$HOME/.config/tor/exclude-routes.active"
+
+# ── Colores ──────────────────────────────────────────────────────────────────
+R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m' D='\033[0m'
+
+## ok - imprime mensaje de éxito
+ok()   { echo -e "${G}✓${D} $*" >&2; }
+## err - imprime mensaje de error
+err()  { echo -e "${R}✗${D} $*" >&2; }
+## info - imprime mensaje informativo
+info() { echo -e "${B}·${D} $*" >&2; }
+## warn - imprime mensaje de advertencia
+warn() { echo -e "${Y}!${D} $*" >&2; }
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+## tor_pid_running - verifica si el proceso de Tor está activo
+tor_pid_running() {
+    [ -f "$TOR_PID" ] && kill -0 "$(cat "$TOR_PID")" 2>/dev/null
+}
+
+## t2s_pid_running - verifica si el proceso de tun2socks está activo
+t2s_pid_running() {
+    [ -f "$T2S_PID" ] && kill -0 "$(cat "$T2S_PID")" 2>/dev/null
+}
+
+## tor_circuit_ready - verifica si el circuito Tor responde
+tor_circuit_ready() {
+    curl -sf --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" --max-time 5 \
+        https://check.torproject.org/api/ip 2>/dev/null \
+        | grep -q '"IsTor":true'
+}
+
+## tun_up - verifica si la interfaz TUN existe
+tun_up() {
+    ip link show "$TUN" &>/dev/null
+}
+
+## first_bridge_ip - obtiene la IP del primer bridge configurado
+first_bridge_ip() {
+    grep -E "^Bridge (obfs4|webtunnel)" "$TORRC" 2>/dev/null \
+        | head -1 | awk '{print $3}' | cut -d: -f1 | tr -d '[]'
+}
+
+## all_bridge_ipv4s - obtiene todas las IPv4 de bridges configurados
+all_bridge_ipv4s() {
+    grep -E "^Bridge (obfs4|webtunnel)" "$TORRC" 2>/dev/null | while read -r _ _ addr _; do
+        case "$addr" in
+            \[*)  continue ;;
+            *)    echo "$addr" | cut -d: -f1 ;;
+        esac
+    done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
+}
+
+## bootstrap_progress - obtiene el porcentaje de bootstrap desde el log de Tor
+bootstrap_progress() {
+    grep -o 'Bootstrapped [0-9]*%[^:]*' "$TORLOG" 2>/dev/null | tail -1
+}
+
+## reload_tor_bridges - recarga los puentes en Tor sin bajar el túnel
+reload_tor_bridges() {
+    if tor_pid_running; then
+        info "Recargando puentes en Tor sin bajar el túnel..."
+        kill -HUP "$(cat "$TOR_PID")" 2>/dev/null && ok "Tor recargado" || warn "No se pudo recargar Tor"
+    fi
+}
+
+## _find_binary - localiza un binario en PATH o rutas comunes
+_find_binary() {
+    local name="$1"
+    if command -v "$name" &>/dev/null; then
+        command -v "$name"
+        return 0
+    fi
+    local p
+    for p in "/usr/bin/$name" "/usr/local/bin/$name" "/usr/sbin/$name" "/usr/local/sbin/$name" "/sbin/$name" "$HOME/.local/bin/$name"; do
+        [ -x "$p" ] && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+# ── torrc: garantizar estructura mínima ─────────────────────────────────────
+
+## _append_if_missing - añade una línea a torrc si no existe ya
+_append_if_missing() {
+    local pattern="$1" line="$2"
+    if ! grep -qE "$pattern" "$TORRC" 2>/dev/null; then
+        echo "$line" >> "$TORRC"
+        warn "Añadido a torrc: $line"
+        return 0
+    fi
+    return 1
+}
+
+## _ensure_torrc - crea el torrc si no existe, o completa líneas mínimas faltantes
+_ensure_torrc() {
+    mkdir -p "$(dirname "$TORRC")"
+
+    if [ ! -f "$TORRC" ]; then
+        info "No existe $TORRC, creando uno base..."
+        cat > "$TORRC" << EOF
+UseBridges 1
+
+# --- Circuitos ---
+CircuitBuildTimeout 10
+LearnCircuitBuildTimeout 1
+NumEntryGuards 4
+MaxCircuitDirtiness 600
+
+# --- Control / DNS ---
+SocksPort $SOCKS_HOST:$SOCKS_PORT
+ControlPort $CTRL_PORT
+CookieAuthentication 1
+DNSPort $SOCKS_HOST:5353
+DataDirectory $HOME/.config/tor/data
+Log notice file $TORLOG
+EOF
+        ok "Creado $TORRC. Carga puentes con: torguard fetch"
+        return 0
+    fi
+
+    local changed=0
+    _append_if_missing '^UseBridges'          'UseBridges 1'                          && changed=1
+    _append_if_missing '^SocksPort'           "SocksPort $SOCKS_HOST:$SOCKS_PORT"      && changed=1
+    _append_if_missing '^ControlPort'         "ControlPort $CTRL_PORT"                 && changed=1
+    _append_if_missing '^CookieAuthentication' 'CookieAuthentication 1'                && changed=1
+    _append_if_missing '^DNSPort'             "DNSPort $SOCKS_HOST:5353"                 && changed=1
+    _append_if_missing '^DataDirectory'       "DataDirectory $HOME/.config/tor/data"   && changed=1
+    _append_if_missing '^Log'                 "Log notice file $TORLOG"                && changed=1
+
+    [ "$changed" -eq 1 ] && ok "torrc completado con las líneas mínimas que faltaban"
+    return 0
+}
+
+## _check_tun2socks_caps - aplica la capability cap_net_admin a tun2socks si falta
+_check_tun2socks_caps() {
+    local t2s_bin
+    t2s_bin=$(_find_binary tun2socks) || { err "No encontré 'tun2socks' en PATH ni rutas comunes"; return 1; }
+
+    local getcap_bin setcap_bin
+    getcap_bin=$(_find_binary getcap) || { warn "No encontré 'getcap' (libcap2-bin). No puedo verificar/aplicar capability a tun2socks"; return 0; }
+    setcap_bin=$(_find_binary setcap) || { warn "No encontré 'setcap' (libcap2-bin). No puedo aplicar capability a tun2socks"; return 0; }
+
+    if "$getcap_bin" "$t2s_bin" 2>/dev/null | grep -q 'cap_net_admin'; then
+        return 0
+    fi
+
+    warn "$t2s_bin no tiene permiso para manejar la interfaz $TUN"
+    info "Aplicando: sudo $setcap_bin cap_net_admin,cap_net_raw=+ep $t2s_bin"
+    if sudo "$setcap_bin" cap_net_admin,cap_net_raw=+ep "$t2s_bin" 2>/dev/null; then
+        ok "Capability aplicada a $t2s_bin"
+    else
+        err "No se pudo aplicar setcap a tun2socks."
+        err "Ejecuta manualmente: sudo $setcap_bin cap_net_admin,cap_net_raw=+ep $t2s_bin"
+        return 1
+    fi
+}
+
+## _check_port_conflicts - detecta procesos escuchando en los puertos de torguard
+_check_port_conflicts() {
+    local ss_bin
+    ss_bin=$(_find_binary ss) || return 0
+
+    local port pid_info any=0
+    for port in "$SOCKS_PORT" "$CTRL_PORT" 5353; do
+        pid_info=$(sudo "$ss_bin" -tlnp 2>/dev/null | awk -v addr="$SOCKS_HOST" -v p="$port" \
+            '$4 == addr":"p || $4 == "0.0.0.0:"p || $4 == "*:"p || $4 == "[::]:"p {print $0}')
+        if [ -n "$pid_info" ]; then
+            warn "Puerto $port ya está en uso en $SOCKS_HOST (o wildcard):"
+            echo "  $pid_info" >&2
+            any=1
+        fi
+    done
+
+    if [ "$any" -eq 1 ]; then
+        warn "Si es un tor.service del sistema, ejecuta: torguard setup"
+        warn "Si es un torguard anterior colgado: torguard disable"
+    fi
+}
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+## _setup_check_systemd_tor - detiene y deshabilita el tor.service del sistema si está activo
+_setup_check_systemd_tor() {
+    command -v systemctl &>/dev/null || return 0
+    systemctl list-unit-files 2>/dev/null | grep -q '^tor\.service' || return 0
+
+    local active enabled
+    active=$(systemctl is-active tor 2>/dev/null || true)
+    enabled=$(systemctl is-enabled tor 2>/dev/null || true)
+
+    if [ "$active" = "active" ] || [ "$enabled" = "enabled" ]; then
+        warn "Detecté tor.service del sistema (active=$active, enabled=$enabled)"
+        warn "Ocupa 9050/9051/5353 y choca con torguard. Lo voy a detener y deshabilitar."
+        sudo systemctl stop tor 2>/dev/null || true
+        sudo systemctl disable tor 2>/dev/null || true
+        ok "tor.service detenido y deshabilitado"
+    else
+        info "tor.service existe pero está inactivo/deshabilitado, sin conflicto"
+    fi
+}
+
+## _setup_install_packages - instala tor, obfs4proxy y libcap2-bin si faltan
+_setup_install_packages() {
+    local pkgs=(tor obfs4proxy libcap2-bin)
+    local missing=()
+    local p
+    for p in "${pkgs[@]}"; do
+        dpkg -s "$p" &>/dev/null || missing+=("$p")
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        ok "Paquetes necesarios ya instalados: ${pkgs[*]}"
+        return 0
+    fi
+
+    warn "Faltan paquetes: ${missing[*]}"
+    info "Instalando (requiere sudo)..."
+    sudo apt-get update -qq
+    sudo apt-get install -y "${missing[@]}"
+    ok "Instalados: ${missing[*]}"
+}
+
+## _setup_check_tunnel_binaries - verifica presencia de tun2socks y webtunnel-client
+_setup_check_tunnel_binaries() {
+    local t2s wt
+    t2s=$(_find_binary tun2socks) || true
+    wt=$(_find_binary webtunnel-client) || true
+
+    if [ -n "$t2s" ]; then
+        ok "tun2socks encontrado: $t2s"
+    else
+        warn "No encontré tun2socks. Opciones:"
+        warn "  - torguard init  (lo compila local si tienes go+git y red)"
+        warn "  - compilarlo cross en otra máquina y copiarlo a ~/.local/bin/tun2socks"
+    fi
+
+    if [ -n "$wt" ]; then
+        ok "webtunnel-client encontrado: $wt"
+    else
+        warn "No encontré webtunnel-client (solo necesario si usas bridges webtunnel)."
+        warn "  - torguard init  (lo compila local si tienes go+git y red)"
+        warn "  - compilarlo cross en otra máquina y copiarlo a ~/.local/bin/webtunnel-client"
+    fi
+}
+
+## cmd_setup - prepara el sistema para correr torguard
+cmd_setup() {
+    info "Preparando el sistema para torguard..."
+    echo "" >&2
+
+    info "[1/4] Chequeando tor.service del sistema..."
+    _setup_check_systemd_tor
+    echo "" >&2
+
+    info "[2/4] Chequeando paquetes (tor, obfs4proxy, libcap2-bin)..."
+    _setup_install_packages
+    echo "" >&2
+
+    info "[3/4] Aplicando capabilities (DNSPort para tor, TUN para tun2socks)..."
+    _ensure_torrc
+    _check_tun2socks_caps || true
+    echo "" >&2
+
+    info "[4/4] Chequeando binarios de túnel (tun2socks / webtunnel-client)..."
+    _setup_check_tunnel_binaries
+    echo "" >&2
+
+    ok "Setup completo."
+    info "Si falta algún bridge: torguard fetch"
+    info "Para activar: torguard enable"
+}
+
+# ── Init ──────────────────────────────────────────────────────────────────────
+_INIT_BIN_DIR="$HOME/.local/bin"
+_TUN2SOCKS_REPO="github.com/xjasonlyu/tun2socks/v2"
+_WEBTUNNEL_REPO="https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel.git"
+
+## _init_check_deps - verifica que go y git estén disponibles
+_init_check_deps() {
+    local missing=()
+    command -v go  &>/dev/null || missing+=("go")
+    command -v git &>/dev/null || missing+=("git")
+    if [ ${#missing[@]} -gt 0 ]; then
+        err "Faltan dependencias: ${missing[*]}"
+        err "Instalalas con tu gestor de paquetes, ej: sudo apt install golang-go git"
+        return 1
+    fi
+    return 0
+}
+
+## _init_backup_existing - respalda un binario existente antes de sobrescribirlo
+_init_backup_existing() {
+    local path="$1"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        local bak="${path}.bak.$(date +%Y%m%d%H%M%S)"
+        mv "$path" "$bak"
+        warn "Binario existente respaldado: $bak"
+    fi
+}
+
+## _init_tun2socks - compila e instala tun2socks
+_init_tun2socks() {
+    info "Compilando tun2socks ($_TUN2SOCKS_REPO)..."
+    local gobin
+    gobin=$(go env GOBIN)
+    [ -z "$gobin" ] && gobin="$(go env GOPATH)/bin"
+
+    if ! GOBIN="$gobin" go install "${_TUN2SOCKS_REPO}@latest" 2>&1 | tail -20; then
+        err "Falló la compilación de tun2socks"
+        return 1
+    fi
+
+    local built="$gobin/tun2socks"
+    if [ ! -x "$built" ]; then
+        err "go install terminó pero no encontré el binario en $built"
+        return 1
+    fi
+
+    _init_backup_existing "$_INIT_BIN_DIR/tun2socks"
+    cp "$built" "$_INIT_BIN_DIR/tun2socks"
+    chmod +x "$_INIT_BIN_DIR/tun2socks"
+    ok "tun2socks instalado en $_INIT_BIN_DIR/tun2socks"
+    "$_INIT_BIN_DIR/tun2socks" --version 2>&1 | head -1 | sed 's/^/  /' >&2
+}
+
+## _init_webtunnel - clona y compila webtunnel-client
+_init_webtunnel() {
+    info "Clonando y compilando webtunnel-client..."
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/webtunnel-build-XXXX)
+
+    if ! git clone --depth 1 "$_WEBTUNNEL_REPO" "$tmpdir/webtunnel" 2>&1 | tail -20; then
+        err "Falló el clonado de webtunnel"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    (
+        cd "$tmpdir/webtunnel" || exit 1
+        if [ -d main/client ]; then
+            go build -o webtunnel-client ./main/client
+        elif [ -d client ]; then
+            go build -o webtunnel-client ./client
+        else
+            go build -o webtunnel-client .
+        fi
+    ) || { err "Falló la compilación de webtunnel-client"; rm -rf "$tmpdir"; return 1; }
+
+    local built="$tmpdir/webtunnel/webtunnel-client"
+    if [ ! -x "$built" ]; then
+        err "La compilación terminó pero no encontré el binario"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    _init_backup_existing "$_INIT_BIN_DIR/webtunnel-client"
+    cp "$built" "$_INIT_BIN_DIR/webtunnel-client"
+    chmod +x "$_INIT_BIN_DIR/webtunnel-client"
+    rm -rf "$tmpdir"
+    ok "webtunnel-client instalado en $_INIT_BIN_DIR/webtunnel-client"
+    "$_INIT_BIN_DIR/webtunnel-client" -version 2>&1 | head -1 | sed 's/^/  /' >&2
+}
+
+## cmd_init - compila e instala tun2socks y webtunnel-client desde fuente
+cmd_init() {
+    info "Inicializando torguard: compilando tun2socks y webtunnel-client..."
+    _init_check_deps || exit 1
+    mkdir -p "$_INIT_BIN_DIR"
+
+    local ok_t2s=0 ok_wt=0
+    _init_tun2socks && ok_t2s=1
+    _init_webtunnel && ok_wt=1
+
+    echo "" >&2
+    case "$PATH" in
+        *"$_INIT_BIN_DIR"*) ;;
+        *) warn "$_INIT_BIN_DIR no está en tu PATH. Agrega esto a tu .zshrc/.bashrc:"
+           warn "  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    esac
+
+    if [ "$ok_t2s" -eq 1 ] && [ "$ok_wt" -eq 1 ]; then
+        ok "Init completo. Actualiza el torrc si hacía falta:"
+        info "  ClientTransportPlugin webtunnel exec $_INIT_BIN_DIR/webtunnel-client"
+        info "  (torguard fetch vuelve a detectar el binario solo la próxima vez)"
+        echo "" >&2
+        info "Aplicando capability a tun2socks recién compilado..."
+        _check_tun2socks_caps || true
+    else
+        err "Init incompleto: revisa los errores arriba"
+        exit 1
+    fi
+}
+
+# ── Exclusión de dominios ─────────────────────────────────────────────────────
+
+## _ensure_exclude_file - crea el archivo de exclusión si no existe
+_ensure_exclude_file() {
+    if [ ! -f "$EXCLUDE_FILE" ]; then
+        mkdir -p "$(dirname "$EXCLUDE_FILE")"
+        cat > "$EXCLUDE_FILE" << 'EOF'
+# torguard — dominios que NO deben pasar por el túnel Tor.
+# Uno por línea. Líneas vacías o que empiecen con # se ignoran.
+# Útil para sitios que detectan/bloquean Tor (bancos, servicios locales, etc).
+#
+# ozon.ru
+# yandex.ru
+# market.yandex.ru
+# gosuslugi.ru
+# tbank.ru
+EOF
+        ok "Creado $EXCLUDE_FILE (vacío, edítalo con: torguard exclude edit)"
+    fi
+}
+
+## _read_exclude_domains - lee la lista de dominios excluidos
+_read_exclude_domains() {
+    _ensure_exclude_file
+    grep -vE '^[[:space:]]*(#|$)' "$EXCLUDE_FILE" 2>/dev/null \
+        | sed 's/[[:space:]]*$//' || true
+}
+
+## _resolve_exclude_ips - resuelve una lista de dominios a IPs únicas
+_resolve_exclude_ips() {
+    local d
+    for d in "$@"; do
+        timeout 3 getent ahostsv4 "$d" 2>/dev/null | awk '{print $1}' || true
+    done | sort -u
+}
+
+## _apply_exclude_routes - aplica rutas directas para una lista de IPs
+_apply_exclude_routes() {
+    local gw="$1" iface="$2"; shift 2
+    local ips=("$@")
+    [ ${#ips[@]} -eq 0 ] && return 0
+
+    local ip
+    for ip in "${ips[@]}"; do
+        sudo ip route replace "$ip" via "$gw" dev "$iface" 2>/dev/null || true
+    done
+    printf '%s\n' "${ips[@]}" > "$EXCLUDE_ROUTES_FILE"
+}
+
+## _clear_exclude_routes - elimina las rutas de exclusión aplicadas
+_clear_exclude_routes() {
+    [ -f "$EXCLUDE_ROUTES_FILE" ] || return 0
+    local ip
+    while IFS= read -r ip; do
+        [ -n "$ip" ] && sudo ip route del "$ip" 2>/dev/null || true
+    done < "$EXCLUDE_ROUTES_FILE"
+    rm -f "$EXCLUDE_ROUTES_FILE"
+}
+
+## cmd_exclude_refresh - reresuelve dominios excluidos y reaplica rutas
+cmd_exclude_refresh() {
+    if ! tun_up; then
+        err "Torguard no está activo, no hay red que excluir todavía"
+        err "Los dominios de $EXCLUDE_FILE se aplican automáticamente en el próximo 'torguard enable'"
+        exit 1
+    fi
+
+    local gw iface
+    gw=$(ip route | awk '$1=="default"{print $3; exit}')
+    iface=$(ip route | awk '$1=="default"{print $5; exit}')
+    if [ -z "$gw" ] || [ -z "$iface" ]; then
+        err "No se pudo determinar la puerta de enlace original"
+        exit 1
+    fi
+
+    local domains
+    mapfile -t domains < <(_read_exclude_domains)
+    if [ ${#domains[@]} -eq 0 ]; then
+        warn "Lista de exclusión vacía ($EXCLUDE_FILE)"
+        _clear_exclude_routes
+        return 0
+    fi
+
+    info "Resolviendo ${#domains[@]} dominios excluidos..."
+    local ips
+    mapfile -t ips < <(_resolve_exclude_ips "${domains[@]}")
+
+    if [ ${#ips[@]} -eq 0 ]; then
+        warn "No se resolvió ninguna IP. Se mantienen las rutas anteriores (si había)."
+        return 1
+    fi
+
+    _clear_exclude_routes
+    info "Aplicando ${#ips[@]} rutas directas (requiere sudo)..."
+    _apply_exclude_routes "$gw" "$iface" "${ips[@]}"
+    ok "Rutas de exclusión actualizadas (${#ips[@]} IPs, ${#domains[@]} dominios)"
+}
+
+## cmd_exclude - gestiona la lista de dominios excluidos del túnel
+cmd_exclude() {
+    _ensure_exclude_file
+    case "${1:-list}" in
+        list)
+            info "Dominios excluidos ($EXCLUDE_FILE):"
+            _read_exclude_domains | sed 's/^/  /' >&2
+            ;;
+        add)
+            local d="${2:-}"
+            [ -z "$d" ] && { err "Uso: torguard exclude add <dominio>"; exit 1; }
+            if grep -qxF "$d" "$EXCLUDE_FILE" 2>/dev/null; then
+                warn "$d ya está en la lista"
+            else
+                echo "$d" >> "$EXCLUDE_FILE"
+                ok "Añadido: $d"
+                tun_up && info "Ejecuta 'torguard exclude refresh' para aplicarlo ahora"
+            fi
+            ;;
+        remove)
+            local d="${2:-}"
+            [ -z "$d" ] && { err "Uso: torguard exclude remove <dominio>"; exit 1; }
+            sed -i "\|^${d}\$|d" "$EXCLUDE_FILE"
+            ok "Eliminado: $d"
+            tun_up && info "Ejecuta 'torguard exclude refresh' para aplicarlo ahora"
+            ;;
+        edit)
+            $EDITOR "$EXCLUDE_FILE"
+            tun_up && info "Ejecuta 'torguard exclude refresh' para aplicar los cambios"
+            ;;
+        refresh)
+            cmd_exclude_refresh
+            ;;
+        *)
+            echo "Uso: torguard exclude {list|add <dominio>|remove <dominio>|edit|refresh}"
+            ;;
+    esac
+}
+
+## wait_tor - espera a que el circuito Tor esté listo, mostrando progreso
+wait_tor() {
+    local timeout=90
+    local elapsed=0
+    local last_progress=""
+
+    echo "" >&2
+    while [ $elapsed -lt $timeout ]; do
+        local progress
+        progress=$(bootstrap_progress)
+        if [ -n "$progress" ] && [ "$progress" != "$last_progress" ]; then
+            echo -ne "\r${B}·${D} Tor: $progress                    " >&2
+            last_progress="$progress"
+        fi
+
+        if tor_circuit_ready; then
+            echo -e "\r${G}✓${D} Tor: Bootstrapped 100% — Done                    " >&2
+            return 0
+        fi
+
+        if ! tor_pid_running; then
+            echo "" >&2
+            err "Tor terminó inesperadamente. Revisa el log:"
+            err "  torguard log"
+            return 1
+        fi
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    echo "" >&2
+    err "Timeout esperando circuito (${timeout}s)"
+    err "Último progreso: $(bootstrap_progress)"
+    err "Revisa los puentes en $TORRC o usa: torguard log"
+    return 1
+}
+
+## cmd_enable - activa Tor y levanta el túnel de red
+cmd_enable() {
+    if tor_pid_running && tun_up && t2s_pid_running; then
+        if tor_circuit_ready; then
+            ok "Torguard ya está activo y funcionando"
+            cmd_status
+            return 0
+        else
+            warn "Tor está corriendo pero el circuito no responde"
+            warn "Prueba: torguard disable && torguard enable"
+            return 1
+        fi
+    fi
+
+    if tor_pid_running && tor_circuit_ready && ! tun_up; then
+        warn "Tor activo pero sin túnel. Levantando red..."
+        _setup_network
+        return 0
+    fi
+
+    info "Lanzando Tor..."
+    _ensure_torrc
+    _check_port_conflicts
+    : > "$TORLOG"
+    tor -f "$TORRC" >/dev/null 2>&1 &
+    echo $! > "$TOR_PID"
+
+    info "Esperando circuito Tor (puede tardar ~60s con puentes)..."
+    if ! wait_tor; then
+        _cleanup_tor
+        exit 1
+    fi
+
+    _setup_network
+}
+
+## _setup_network - crea la interfaz TUN, lanza tun2socks y configura rutas
+_setup_network() {
+    info "Levantando interfaz de red..."
+
+    local bridge_ips gw iface
+    mapfile -t bridge_ips < <(all_bridge_ipv4s)
+    gw=$(ip route | awk '$1=="default"{print $3; exit}')
+    iface=$(ip route | awk '$1=="default"{print $5; exit}')
+
+    local exclude_domains=() exclude_ips=()
+    mapfile -t exclude_domains < <(_read_exclude_domains)
+    if [ ${#exclude_domains[@]} -gt 0 ]; then
+        info "Resolviendo ${#exclude_domains[@]} dominios excluidos (irán directo, sin Tor)..."
+        mapfile -t exclude_ips < <(_resolve_exclude_ips "${exclude_domains[@]}")
+        if [ ${#exclude_ips[@]} -gt 0 ]; then
+            ok "  ${#exclude_ips[@]} IPs quedarán fuera del túnel"
+        else
+            warn "  No se resolvió ninguna IP de la lista de exclusión"
+        fi
+    fi
+
+    info "Creando interfaz $TUN (requiere sudo)..."
+    sudo sh -c "
+        ip link del $TUN 2>/dev/null || true
+        sleep 0.3
+        ip tuntap add mode tun $TUN
+        ip addr replace $TUN_ADDR dev $TUN
+        ip link set $TUN up
+    "
+
+    if ! _check_tun2socks_caps; then
+        err "tun2socks no podrá abrir $TUN sin permisos. Abortando."
+        sudo ip link del $TUN 2>/dev/null || true
+        _cleanup_tor
+        exit 1
+    fi
+
+    : > "$T2SLOG"
+    tun2socks --device $TUN --proxy socks5://$SOCKS_HOST:$SOCKS_PORT --loglevel error > "$T2SLOG" 2>&1 &
+    echo $! > "$T2S_PID"
+    sleep 1
+
+    if ! t2s_pid_running; then
+        err "tun2socks falló al arrancar. Log ($T2SLOG):"
+        tail -20 "$T2SLOG" >&2 2>/dev/null || true
+        sudo ip link del $TUN 2>/dev/null || true
+        _cleanup_tor
+        exit 1
+    fi
+
+    info "Configurando rutas (requiere sudo)..."
+    if [ ${#bridge_ips[@]} -gt 0 ]; then
+        info "Excluyendo ${#bridge_ips[@]} IPs de bridges del túnel (evita 'Tor sobre Tor')..."
+        local bip
+        for bip in "${bridge_ips[@]}"; do
+            sudo ip route replace "$bip" via "$gw" dev "$iface" 2>/dev/null || true
+        done
+    else
+        warn "No detecté IPs de bridges IPv4 en el torrc para excluir del túnel"
+    fi
+
+    sudo sh -c "
+        ip route replace 0.0.0.0/1   dev $TUN
+        ip route replace 128.0.0.0/1 dev $TUN
+    "
+
+    if [ ${#exclude_ips[@]} -gt 0 ]; then
+        info "Aplicando rutas directas para dominios excluidos (requiere sudo)..."
+        _apply_exclude_routes "$gw" "$iface" "${exclude_ips[@]}"
+        ok "Exclusión aplicada (${#exclude_ips[@]} IPs directas)"
+    fi
+
+    echo "" >&2
+    if ! t2s_pid_running; then
+        err "tun2socks murió después de configurar rutas. Log ($T2SLOG):"
+        tail -20 "$T2SLOG" >&2 2>/dev/null || true
+        exit 1
+    fi
+
+    ok "Torguard activo"
+    local ip
+    ip=$(curl -sf --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" --max-time 8 https://api.ipify.org 2>/dev/null || echo "?")
+    info "IP pública: ${G}${ip}${D}"
+}
+
+## cmd_disable - detiene Tor, tun2socks y restaura la red
+cmd_disable() {
+    info "Deteniendo torguard..."
+
+    if t2s_pid_running; then
+        kill "$(cat "$T2S_PID")" 2>/dev/null && ok "tun2socks detenido"
+    fi
+    rm -f "$T2S_PID"
+
+    if tor_pid_running; then
+        kill "$(cat "$TOR_PID")" 2>/dev/null && ok "Tor detenido"
+    fi
+    rm -f "$TOR_PID"
+
+    if [ -f "$EXCLUDE_ROUTES_FILE" ]; then
+        info "Limpiando rutas de exclusión..."
+        _clear_exclude_routes
+    fi
+
+    info "Restaurando red (requiere sudo)..."
+    sudo sh -c "
+        ip link del $TUN 2>/dev/null || true
+        ip route del 0.0.0.0/1   2>/dev/null || true
+        ip route del 128.0.0.0/1 2>/dev/null || true
+        true
+    "
+
+    ok "Torguard desactivado"
+}
+
+## cmd_status - muestra el estado actual de torguard
+cmd_status() {
+    echo ""
+    echo -e "  Tor process : $(tor_pid_running && echo -e "${G}corriendo${D} (PID $(cat "$TOR_PID" 2>/dev/null))" || echo -e "${R}detenido${D}")"
+    echo -e "  tun2socks   : $(t2s_pid_running && echo -e "${G}corriendo${D} (PID $(cat "$T2S_PID" 2>/dev/null))" || echo -e "${R}detenido${D}")"
+    echo -e "  Interfaz    : $(tun_up          && echo -e "${G}${TUN} activa${D}" || echo -e "${R}sin túnel${D}")"
+
+    if tor_pid_running; then
+        local result ip is_tor
+        result=$(curl -sf --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" --max-time 8 \
+            https://check.torproject.org/api/ip 2>/dev/null || echo "{}")
+        ip=$(echo "$result"     | grep -o '"IP":"[^"]*"'   | cut -d'"' -f4)
+        is_tor=$(echo "$result" | grep -o '"IsTor":[a-z]*' | cut -d: -f2)
+        echo -e "  IP pública  : ${G}${ip:-?}${D}"
+        echo -e "  Es Tor      : $([ "$is_tor" = "true" ] && echo -e "${G}sí${D}" || echo -e "${R}no${D}")"
+        echo -e "  Bootstrap   : $(bootstrap_progress)"
+    fi
+
+    if tun_up; then
+        local dns_line
+        dns_line=$(resolvectl status "$TUN" 2>/dev/null | grep -m1 'DNS Servers' || true)
+        [ -n "$dns_line" ] && echo -e "  DNS ($TUN)  : ${G}$(echo "$dns_line" | sed 's/^[[:space:]]*//')${D}"
+    fi
+
+    if [ -f "$EXCLUDE_ROUTES_FILE" ]; then
+        local n
+        n=$(wc -l < "$EXCLUDE_ROUTES_FILE" 2>/dev/null || echo 0)
+        echo -e "  Exclusión   : ${G}${n}${D} IPs directas (torguard exclude list)"
+    fi
+
+    if ! t2s_pid_running && [ -f "$T2SLOG" ] && [ -s "$T2SLOG" ]; then
+        echo -e "  ${Y}tun2socks no está corriendo. Últimas líneas de $T2SLOG:${D}"
+        tail -5 "$T2SLOG" | sed 's/^/    /'
+    fi
+    echo ""
+}
+
+## cmd_newid - solicita una nueva identidad/circuito a Tor
+cmd_newid() {
+    if ! tor_pid_running; then
+        err "Tor no está corriendo"
+        exit 1
+    fi
+
+    info "Solicitando nueva identidad..."
+
+    if grep -q "^ControlPort" "$TORRC" 2>/dev/null; then
+        printf 'AUTHENTICATE\r\nSIGNAL NEWNYM\r\nQUIT\r\n' \
+            | nc -q1 127.0.0.1 "$CTRL_PORT" &>/dev/null \
+            && ok "Nueva identidad solicitada (espera ~5s)" \
+            || warn "No se pudo contactar el puerto de control"
+    else
+        kill -HUP "$(cat "$TOR_PID")" 2>/dev/null
+        ok "Circuitos rotados"
+    fi
+
+    sleep 5
+    local ip
+    ip=$(curl -sf --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" --max-time 8 https://api.ipify.org 2>/dev/null || echo "?")
+    info "Nueva IP pública: ${G}${ip}${D}"
+}
+
+## _cleanup_tor - mata el proceso de Tor y limpia su archivo de PID
+_cleanup_tor() {
+    kill "$(cat "$TOR_PID" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$TOR_PID"
+}
+
+## cmd_log - muestra el log de Tor en tiempo real
+cmd_log() {
+    [ -f "$TORLOG" ] || { err "Sin log todavía: $TORLOG"; exit 1; }
+    tail -f "$TORLOG"
+}
+
+## cmd_t2slog - muestra el log de tun2socks en tiempo real
+cmd_t2slog() {
+    [ -f "$T2SLOG" ] || { err "Sin log todavía: $T2SLOG"; exit 1; }
+    tail -f "$T2SLOG"
+}
+
+## cmd_bridges - abre el torrc en el editor para edición manual de puentes
+cmd_bridges() {
+    info "Abriendo torrc en $EDITOR..."
+    $EDITOR "$TORRC"
+    reload_tor_bridges
+}
+
+# ── Fetch ─────────────────────────────────────────────────────────────────────
+
+## _moat_get_bridges - obtiene puentes de Moat resolviendo un captcha
+_moat_get_bridges() {
+    local transport="$1"
+    local tmp_img
+    tmp_img=$(mktemp /tmp/torguard-captcha-XXXX.jpg)
+
+    info "Contactando Moat para puentes $transport..."
+    local fetch_resp
+    fetch_resp=$(curl -sf --max-time 15 \
+        -H "Content-Type: application/vnd.api+json" \
+        -H "Accept: application/vnd.api+json" \
+        -d '{"data":[{"version":"0.1.0","type":"client-transports","supported":["'"$transport"'"]}]}' \
+        "$MOAT_URL/fetch" 2>/dev/null) || { err "No se pudo contactar Moat"; rm -f "$tmp_img"; return 1; }
+
+    local challenge img_b64
+    challenge=$(echo "$fetch_resp" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(d['data'][0].get('challenge',''))
+" 2>/dev/null) || true
+
+    img_b64=$(echo "$fetch_resp" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(d['data'][0].get('image',''))
+" 2>/dev/null) || true
+
+    if [ -z "$challenge" ]; then
+        err "Respuesta inesperada de Moat"
+        rm -f "$tmp_img"
+        return 1
+    fi
+
+    if [ -n "$img_b64" ]; then
+        echo "$img_b64" | python3 -c "
+import sys,base64
+data=sys.stdin.read().strip()
+sys.stdout.buffer.write(base64.b64decode(data))
+" > "$tmp_img" 2>/dev/null || true
+
+        local opened=false
+        for viewer in eog feh xdg-open display gpicview; do
+            if command -v "$viewer" &>/dev/null; then
+                "$viewer" "$tmp_img" &>/dev/null &
+                opened=true
+                break
+            fi
+        done
+
+        if ! $opened; then
+            warn "No se encontró visor de imágenes."
+            warn "La imagen del captcha está en: $tmp_img"
+            warn "Ábrela manualmente y luego vuelve aquí."
+        fi
+    fi
+
+    echo "" >&2
+    echo -e "${Y}Resuelve el captcha que se abrió y escribe la solución:${D}" >&2
+    read -rp "  Captcha: " solution
+    rm -f "$tmp_img"
+
+    [ -z "$solution" ] && { err "Solución vacía"; return 1; }
+
+    local check_resp
+    check_resp=$(curl -sf --max-time 15 \
+        -H "Content-Type: application/vnd.api+json" \
+        -H "Accept: application/vnd.api+json" \
+        -d '{
+          "data": [{
+            "id":        "2",
+            "version":   "0.1.0",
+            "type":      "moat-solution",
+            "transport": "'"$transport"'",
+            "challenge": "'"$challenge"'",
+            "solution":  "'"$solution"'",
+            "qrcode":    "false"
+          }]
+        }' \
+        "$MOAT_URL/check" 2>/dev/null) || { err "Error enviando solución a Moat"; return 1; }
+
+    local bridges
+    bridges=$(echo "$check_resp" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    item=d['data'][0]
+    for b in item.get('bridges',[]):
+        print('Bridge ' + b)
+except Exception as e:
+    sys.stderr.write('parse error: ' + str(e) + '\n')
+    sys.exit(1)
+" 2>/tmp/torguard-moat-err) || {
+        warn "No se pudieron extraer puentes. Respuesta de Moat:"
+        { echo "$check_resp" | python3 -m json.tool 2>/dev/null || echo "$check_resp"; } >&2
+        cat /tmp/torguard-moat-err 2>/dev/null >&2 || true
+        return 1
+    }
+
+    if [ -z "$bridges" ]; then
+        warn "Moat respondió pero sin puentes (captcha incorrecto?)"
+        warn "Respuesta: $check_resp"
+        return 1
+    fi
+
+    echo "$bridges"
+}
+
+## _write_bridges_to_torrc - escribe puentes en torrc preservando el resto de la config
+_write_bridges_to_torrc() {
+    local obfs4_bridges="$1"
+    local webtunnel_bridges="$2"
+    local obfs4_bin="$3"
+    local wt_bin="$4"
+
+    python3 - "$TORRC" "$obfs4_bin" "$wt_bin" << PYEOF
+import sys, re
+
+path      = sys.argv[1]
+obfs4_bin = sys.argv[2]
+wt_bin    = sys.argv[3]
+
+raw_obfs4 = """$obfs4_bridges"""
+raw_wt    = """$webtunnel_bridges"""
+
+def clean(raw):
+    return [l for l in raw.splitlines() if l.startswith("Bridge ")]
+
+new_obfs4 = clean(raw_obfs4)
+new_wt    = clean(raw_wt)
+
+with open(path) as f:
+    content = f.read()
+
+existing_obfs4 = re.findall(r'^Bridge obfs4 .*$', content, flags=re.MULTILINE)
+existing_wt    = re.findall(r'^Bridge webtunnel .*$', content, flags=re.MULTILINE)
+
+final_obfs4 = new_obfs4 if new_obfs4 else existing_obfs4
+final_wt    = new_wt    if new_wt    else existing_wt
+
+content = re.sub(r'# --- (obfs4|webtunnel).*\n', '', content)
+content = re.sub(r'^Bridge .*\n', '', content, flags=re.MULTILINE)
+content = re.sub(r'^# ExitNodes .*\n', '', content, flags=re.MULTILINE)
+content = re.sub(r'\n{3,}', '\n\n', content).strip()
+
+def ensure_plugin(content, transport, binpath):
+    if not binpath:
+        return content
+    pattern = r'^ClientTransportPlugin ' + re.escape(transport) + r' exec .*$'
+    if re.search(pattern, content, flags=re.MULTILINE):
+        return content
+    line = 'ClientTransportPlugin ' + transport + ' exec ' + binpath + '\n'
+    matches = list(re.finditer(r'^ClientTransportPlugin .*\n', content, flags=re.MULTILINE))
+    if matches:
+        pos = matches[-1].end()
+    else:
+        m = re.search(r'^UseBridges.*\n', content, flags=re.MULTILINE)
+        pos = m.end() if m else 0
+    return content[:pos] + line + content[pos:]
+
+if final_obfs4:
+    content = ensure_plugin(content, "obfs4", obfs4_bin)
+if final_wt:
+    content = ensure_plugin(content, "webtunnel", wt_bin)
+
+block = '\n'
+if final_obfs4:
+    block += '# --- obfs4 (primario) ---\n' + '\n'.join(final_obfs4) + '\n'
+if final_wt:
+    block += '# --- webtunnel (respaldo) ---\n' + '\n'.join(final_wt) + '\n'
+
+matches = list(re.finditer(r'^ClientTransportPlugin .*\n', content, flags=re.MULTILINE))
+if matches:
+    pos = matches[-1].end()
+    content = content[:pos] + block + content[pos:]
+else:
+    content += block
+
+with open(path, 'w') as f:
+    f.write(content + '\n')
+print('ok')
+PYEOF
+}
+
+## cmd_fetch - obtiene puentes vía Moat y actualiza el torrc
+cmd_fetch() {
+    local transport="${1:-obfs4}"
+    local valid=("obfs4" "webtunnel" "both")
+
+    if [[ ! " ${valid[*]} " =~ " $transport " ]]; then
+        err "Transporte desconocido: $transport"
+        echo "Uso: torguard fetch [obfs4|webtunnel|both]"
+        exit 1
+    fi
+
+    local obfs4_bridges="" webtunnel_bridges=""
+
+    if [[ "$transport" == "obfs4" || "$transport" == "both" ]]; then
+        obfs4_bridges=$(_moat_get_bridges "obfs4") || true
+        if [ -n "$obfs4_bridges" ]; then
+            ok "obfs4: $(echo "$obfs4_bridges" | grep -c "^Bridge") puentes obtenidos"
+        else
+            warn "No se obtuvieron puentes obfs4 (se conservan los que ya hubiera)"
+        fi
+    fi
+
+    if [[ "$transport" == "webtunnel" || "$transport" == "both" ]]; then
+        webtunnel_bridges=$(_moat_get_bridges "webtunnel") || true
+        if [ -n "$webtunnel_bridges" ]; then
+            ok "webtunnel: $(echo "$webtunnel_bridges" | grep -c "^Bridge") puentes obtenidos"
+        else
+            warn "No se obtuvieron puentes webtunnel (se conservan los que ya hubiera)"
+        fi
+    fi
+
+    if [ -z "$obfs4_bridges" ] && [ -z "$webtunnel_bridges" ]; then
+        if ! grep -q "^Bridge" "$TORRC" 2>/dev/null; then
+            err "No se obtuvieron puentes y el torrc no tiene ninguno. Edita manualmente con: torguard bridges"
+            exit 1
+        fi
+        warn "No se obtuvieron puentes nuevos. Se mantiene el torrc como estaba."
+        return 1
+    fi
+
+    local obfs4_bin="" wt_bin=""
+    if [[ "$transport" == "obfs4" || "$transport" == "both" ]]; then
+        obfs4_bin=$(_find_binary obfs4proxy) || obfs4_bin=""
+        [ -z "$obfs4_bin" ] && warn "No encontré el binario obfs4proxy (PATH ni rutas comunes); no podré añadir ClientTransportPlugin obfs4 automáticamente"
+    fi
+    if [[ "$transport" == "webtunnel" || "$transport" == "both" ]]; then
+        wt_bin=$(_find_binary webtunnel-client) || wt_bin=""
+        [ -z "$wt_bin" ] && warn "No encontré el binario webtunnel-client (PATH ni rutas comunes); no podré añadir ClientTransportPlugin webtunnel automáticamente"
+    fi
+    if [ -z "$obfs4_bin" ]; then obfs4_bin=$(_find_binary obfs4proxy) || obfs4_bin=""; fi
+    if [ -z "$wt_bin" ]; then wt_bin=$(_find_binary webtunnel-client) || wt_bin=""; fi
+
+    info "Actualizando torrc..."
+    _write_bridges_to_torrc "$obfs4_bridges" "$webtunnel_bridges" "$obfs4_bin" "$wt_bin"
+    ok "torrc actualizado"
+
+    echo "" >&2
+    echo -e "${B}Puentes activos:${D}" >&2
+    grep "^Bridge" "$TORRC" | while read -r line; do
+        echo "  ${line:0:80}" >&2
+    done
+    echo "" >&2
+
+    reload_tor_bridges
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    enable)   cmd_enable  ;;
+    disable)  cmd_disable ;;
+    status)   cmd_status  ;;
+    newid)    cmd_newid   ;;
+    log)      cmd_log     ;;
+    t2slog)   cmd_t2slog  ;;
+    bridges)  cmd_bridges ;;
+    fetch)    cmd_fetch "${2:-obfs4}" ;;
+    exclude)  cmd_exclude "${2:-list}" "${3:-}" ;;
+    setup)    cmd_setup   ;;
+    init)     cmd_init    ;;
+    *)
+        echo "uso: torguard {enable|disable|status|newid|log|t2slog|bridges|fetch|exclude|setup|init}"
+        echo ""
+        echo "  setup           Preparar el sistema: detiene tor.service si está activo,"
+        echo "                  instala tor/obfs4proxy/libcap2-bin si faltan, prepara permisos necesarios"
+        echo "                  para DNSPort y para tun2socks, y chequea binarios de túnel"
+        echo "  init            Compilar tun2socks y webtunnel-client desde fuente (go install/build)"
+        echo "  enable          Activar Tor + tun2socks (tráfico global)"
+        echo "  disable         Desactivar y restaurar red"
+        echo "  status          Ver estado, IP pública, circuito"
+        echo "  newid           Nueva identidad / nueva IP"
+        echo "  log             Ver log de Tor en tiempo real"
+        echo "  t2slog          Ver log de tun2socks en tiempo real"
+        echo "  bridges         Editar puentes en $EDITOR"
+        echo "  fetch           Obtener puentes obfs4 via Moat (con captcha)"
+        echo "  fetch obfs4     Obtener puentes obfs4"
+        echo "  fetch webtunnel Obtener puentes webtunnel"
+        echo "  fetch both      obfs4 (primario) + webtunnel (respaldo)"
+        echo "  exclude list           Ver dominios que van directo, sin Tor"
+        echo "  exclude add <dominio>  Añadir dominio a la exclusión"
+        echo "  exclude remove <dom>   Quitar dominio de la exclusión"
+        echo "  exclude edit           Editar la lista en $EDITOR"
+        echo "  exclude refresh        Reresolver y reaplicar rutas (sin bajar Tor)"
+        ;;
+esac

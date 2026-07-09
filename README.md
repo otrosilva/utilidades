@@ -1,5 +1,8 @@
 # Algunos scripts útiles
 
+## torguard -- usar tor como vpn
+tor con vpn 
+
 ## lingvo.py -- texto a voz ruso@español
 Convierte líneas de texto ruso@español, sólo ruso o español a voz. 
 Si hay archivo cover.png o cover.jpg lo usa para el mp3.
