@@ -21,7 +21,7 @@ EDITOR="${EDITOR:-micro}"
 EXCLUDE_FILE="$HOME/.config/tor/exclude-domains"
 EXCLUDE_ROUTES_FILE="$HOME/.config/tor/exclude-routes.active"
 
-# ── Colores ──────────────────────────────────────────────────────────────────
+# ── Colores ────────────────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m' D='\033[0m'
 
 ## ok - imprime mensaje de éxito
@@ -33,7 +33,7 @@ info() { echo -e "${B}·${D} $*" >&2; }
 ## warn - imprime mensaje de advertencia
 warn() { echo -e "${Y}!${D} $*" >&2; }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 ## tor_pid_running - verifica si el proceso de Tor está activo
 tor_pid_running() {
@@ -55,12 +55,6 @@ tor_circuit_ready() {
 ## tun_up - verifica si la interfaz TUN existe
 tun_up() {
     ip link show "$TUN" &>/dev/null
-}
-
-## first_bridge_ip - obtiene la IP del primer bridge configurado
-first_bridge_ip() {
-    grep -E "^Bridge (obfs4|webtunnel)" "$TORRC" 2>/dev/null \
-        | head -1 | awk '{print $3}' | cut -d: -f1 | tr -d '[]'
 }
 
 ## all_bridge_ipv4s - obtiene todas las IPv4 de bridges configurados
@@ -100,7 +94,7 @@ _find_binary() {
     return 1
 }
 
-# ── torrc: garantizar estructura mínima ─────────────────────────────────────
+# ── torrc: garantizar estructura mínima ────────────────────────────────────
 
 ## _append_if_missing - añade una línea a torrc si no existe ya
 _append_if_missing() {
@@ -140,16 +134,18 @@ EOF
         return 0
     fi
 
-    local changed=0
-    _append_if_missing '^UseBridges'          'UseBridges 1'                          && changed=1
-    _append_if_missing '^SocksPort'           "SocksPort $SOCKS_HOST:$SOCKS_PORT"      && changed=1
-    _append_if_missing '^ControlPort'         "ControlPort $CTRL_PORT"                 && changed=1
-    _append_if_missing '^CookieAuthentication' 'CookieAuthentication 1'                && changed=1
-    _append_if_missing '^DNSPort'             "DNSPort $SOCKS_HOST:5353"                 && changed=1
-    _append_if_missing '^DataDirectory'       "DataDirectory $HOME/.config/tor/data"   && changed=1
-    _append_if_missing '^Log'                 "Log notice file $TORLOG"                && changed=1
+    local changed=false
+    _append_if_missing '^UseBridges'          'UseBridges 1'                          && changed=true
+    _append_if_missing '^SocksPort'           "SocksPort $SOCKS_HOST:$SOCKS_PORT"      && changed=true
+    _append_if_missing '^ControlPort'         "ControlPort $CTRL_PORT"                 && changed=true
+    _append_if_missing '^CookieAuthentication' 'CookieAuthentication 1'                && changed=true
+    _append_if_missing '^DNSPort'             "DNSPort $SOCKS_HOST:5353"                 && changed=true
+    _append_if_missing '^DataDirectory'       "DataDirectory $HOME/.config/tor/data"   && changed=true
+    _append_if_missing '^Log'                 "Log notice file $TORLOG"                && changed=true
 
-    [ "$changed" -eq 1 ] && ok "torrc completado con las líneas mínimas que faltaban"
+    if $changed; then
+        ok "torrc completado con las líneas mínimas que faltaban"
+    fi
     return 0
 }
 
@@ -199,7 +195,7 @@ _check_port_conflicts() {
     fi
 }
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
+# ── Setup ──────────────────────────────────────────────────────────────────
 
 ## _setup_check_systemd_tor - detiene y deshabilita el tor.service del sistema si está activo
 _setup_check_systemd_tor() {
@@ -292,7 +288,7 @@ cmd_setup() {
     info "Para activar: torguard enable"
 }
 
-# ── Init ──────────────────────────────────────────────────────────────────────
+# ── Init ────────────────────────────────────────────────────────────────────
 _INIT_BIN_DIR="$HOME/.local/bin"
 _TUN2SOCKS_REPO="github.com/xjasonlyu/tun2socks/v2"
 _WEBTUNNEL_REPO="https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel.git"
@@ -413,7 +409,7 @@ cmd_init() {
     fi
 }
 
-# ── Exclusión de dominios ─────────────────────────────────────────────────────
+# ── Exclusión de dominios ──────────────────────────────────────────────────
 
 ## _ensure_exclude_file - crea el archivo de exclusión si no existe
 _ensure_exclude_file() {
@@ -617,7 +613,8 @@ cmd_enable() {
 
     info "Esperando circuito Tor (puede tardar ~60s con puentes)..."
     if ! wait_tor; then
-        _cleanup_tor
+        kill "$(cat "$TOR_PID" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$TOR_PID"
         exit 1
     fi
 
@@ -657,7 +654,8 @@ _setup_network() {
     if ! _check_tun2socks_caps; then
         err "tun2socks no podrá abrir $TUN sin permisos. Abortando."
         sudo ip link del $TUN 2>/dev/null || true
-        _cleanup_tor
+        kill "$(cat "$TOR_PID" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$TOR_PID"
         exit 1
     fi
 
@@ -670,7 +668,8 @@ _setup_network() {
         err "tun2socks falló al arrancar. Log ($T2SLOG):"
         tail -20 "$T2SLOG" >&2 2>/dev/null || true
         sudo ip link del $TUN 2>/dev/null || true
-        _cleanup_tor
+        kill "$(cat "$TOR_PID" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$TOR_PID"
         exit 1
     fi
 
@@ -801,12 +800,6 @@ cmd_newid() {
     info "Nueva IP pública: ${G}${ip}${D}"
 }
 
-## _cleanup_tor - mata el proceso de Tor y limpia su archivo de PID
-_cleanup_tor() {
-    kill "$(cat "$TOR_PID" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$TOR_PID"
-}
-
 ## cmd_log - muestra el log de Tor en tiempo real
 cmd_log() {
     [ -f "$TORLOG" ] || { err "Sin log todavía: $TORLOG"; exit 1; }
@@ -826,7 +819,7 @@ cmd_bridges() {
     reload_tor_bridges
 }
 
-# ── Fetch ─────────────────────────────────────────────────────────────────────
+# ── Fetch ──────────────────────────────────────────────────────────────────
 
 ## _moat_get_bridges - obtiene puentes de Moat resolviendo un captcha
 _moat_get_bridges() {
@@ -1077,7 +1070,7 @@ cmd_fetch() {
     reload_tor_bridges
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────
 case "${1:-}" in
     enable)   cmd_enable  ;;
     disable)  cmd_disable ;;
